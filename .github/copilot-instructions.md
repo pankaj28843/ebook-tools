@@ -45,7 +45,7 @@ Document key takeaways in comments or plan files so future agents know which sou
 A change is complete only if **all** conditions hold:
 1. Imports and typing pass `uv run ruff check --fix .` and formatting passes `uv run ruff format .` (run on the entire repo unless scope dictates otherwise).
 2. `timeout 60 uv run pytest --maxfail=1 --disable-warnings --cov=src/ebook_tools --cov-report=term-missing` is green with 100% coverage maintained. Add focused `-k` runs for new/changed areas.
-3. Run at least one CLI smoke test relevant to your change (e.g., `uv run convert-docs --input tests/data/sample.epub --output /tmp/out --codename smoke-test` or `uv run check-epub-toc --nav tests/data/sample/nav.xhtml`).
+3. Run at least one CLI smoke test relevant to your change (e.g., `uv run convert-docs --input tests/data/sample.epub --output /tmp/out` or `uv run check-epub-toc --nav tests/data/sample/nav.xhtml`).
 4. Update docs under `docs/tools/` or `docs/utils/` when behavior, flags, or troubleshooting steps change.
 5. No stray files, no TODO/FIXME placeholders, no commented-out experiments.
 

@@ -212,9 +212,6 @@ coverage.xml
 debug_output*.txt
 debug_session*.log
 
-# Temporary deployment configs
-deployment*.json
-deployment*.json.backup*
 
 # converted docs folder
 mcp-data/

@@ -2,8 +2,8 @@
 PDF to Flattened Markdown Converter
 
 Transforms PDF technical books into numbered Markdown files placed directly in the
-output directory. Assets remain under a shared `images/` folder while section files
-receive deterministic prefixes (`NN-chapter-slug-section-slug.md`).
+output directory. Assets remain under a shared `images/` folder while **chapter** files
+receive deterministic prefixes (`NN-chapter-slug.md`).
 
 The conversion leverages PyMuPDF (fitz) for text extraction and pymupdf4llm for
 Markdown conversion. It preserves:
@@ -120,17 +120,39 @@ class PdfConverter:
         if not outline:
             return [("Full Document", 0, doc.page_count)]
 
-        chapters_info: list[tuple[str, int, int]] = []
-        level_1_entries = [(i, entry) for i, entry in enumerate(outline) if entry[0] == 1]
+        def _entry_level(entry: list) -> int | None:
+            try:
+                return int(entry[0])
+            except (IndexError, TypeError, ValueError):
+                return None
 
-        for idx, (_entry_index, entry) in enumerate(level_1_entries):
-            _level, title, page = entry
-            start_page = max(page - 1, 0)
+        def _entry_title(entry: list, fallback_index: int) -> str:
+            if len(entry) > 1 and isinstance(entry[1], str):
+                title = entry[1].strip()
+                if title:
+                    return title
+            return f"Chapter {fallback_index}"
+
+        def _entry_start_page(entry: list) -> int:
+            if len(entry) > 2:
+                try:
+                    return max(int(entry[2]) - 1, 0)
+                except (TypeError, ValueError):
+                    return 0
+            return 0
+
+        level_1_entries = [entry for entry in outline if _entry_level(entry) == 1]
+        if not level_1_entries:
+            return [("Full Document", 0, doc.page_count)]
+
+        chapters_info: list[tuple[str, int, int]] = []
+        for idx, entry in enumerate(level_1_entries):
+            title = _entry_title(entry, idx + 1)
+            start_page = _entry_start_page(entry)
 
             if idx + 1 < len(level_1_entries):
-                next_entry_idx = level_1_entries[idx + 1][0]
-                next_entry = outline[next_entry_idx]
-                end_page = max(next_entry[2] - 1, start_page)
+                next_start = _entry_start_page(level_1_entries[idx + 1])
+                end_page = max(next_start, start_page)
             else:
                 end_page = doc.page_count
 
@@ -304,40 +326,43 @@ class PdfConverter:
         return str(value).zfill(width) if width > 1 else str(value)
 
     def _flatten_sections(self, chapters: list[EpubChapter], output_dir: Path) -> None:
-        """Move all section files into the root output directory with global numbering."""
-
-        total_sections = sum(len(chapter.sections) for chapter in chapters)
-        if total_sections == 0:
-            for chapter in chapters:
-                shutil.rmtree(chapter.working_dir, ignore_errors=True)
+        if not chapters:
             return
 
-        padding = self._determine_padding(total_sections)
-        global_index = 1
+        padding = self._determine_padding(len(chapters))
 
-        for chapter in chapters:
-            chapter_slug = self._slugify(chapter.title, fallback="")
-            if not chapter_slug:
-                chapter_slug = f"chapter-{self._format_number(global_index, padding)}"
+        for index, chapter in enumerate(chapters, start=1):
+            chapter_slug = self._slugify(chapter.title, fallback=f"chapter-{self._format_number(index, padding)}")
             chapter.slug = chapter_slug[:80] or "chapter"
 
+            final_filename = f"{self._format_number(index, padding)}-{chapter.slug}.md"
+            final_path = output_dir / final_filename
+            if final_path.exists():
+                final_path.unlink()
+
+            content_parts: list[str] = []
+            chapter_title = chapter.title.strip()
+            if chapter_title:
+                content_parts.append(f"# {chapter_title}")
+
             for section in chapter.sections:
-                current_path = Path(section.file_path)
-                section_slug = self._slugify(section.slug_hint or section.title, fallback="section")
-                section_slug = section_slug[:80] or "section"
+                section_path = Path(section.file_path)
+                section_text = ""
+                if section_path.exists():
+                    section_text = section_path.read_text(encoding="utf-8").strip()
+                if section_text:
+                    content_parts.append(section_text)
 
-                prefix = self._format_number(global_index, padding)
-                suffix = current_path.suffix or ".md"
-                base_name = f"{chapter.slug}-{section_slug}".strip("-") or chapter.slug
-                new_filename = f"{prefix}-{base_name}{suffix}"
-                new_path = output_dir / new_filename
-                if new_path.exists():
-                    new_path.unlink()
+                section.filename = final_filename
+                section.file_path = str(final_path)
 
-                current_path.rename(new_path)
-                section.filename = new_filename
-                section.file_path = str(new_path)
+            combined = "\n\n".join(part for part in (part.strip() for part in content_parts) if part)
+            if not combined:
+                combined = f"# {chapter.title or 'Chapter'}"
 
-                global_index += 1
+            final_path.write_text(combined.rstrip() + "\n", encoding="utf-8")
+
+            chapter.output_filename = final_filename
+            chapter.output_path = str(final_path)
 
             shutil.rmtree(chapter.working_dir, ignore_errors=True)

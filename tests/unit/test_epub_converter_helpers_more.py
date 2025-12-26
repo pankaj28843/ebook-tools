@@ -196,14 +196,16 @@ def test_flatten_sections_assigns_numbered_filenames(tmp_path):
     conv._flatten_sections([chapter], tmp_path)
 
     generated = sorted(tmp_path.glob("*.md"))
-    assert len(generated) == 2
-    assert generated[0].name.startswith("1-my-chapter-first-section")
-    assert generated[1].name.startswith("2-my-chapter-second-section")
+    assert len(generated) == 1
+    assert generated[0].name == "1-my-chapter.md"
+    content = generated[0].read_text(encoding="utf-8")
+    assert "first" in content
+    assert "second" in content
 
 
 def test_flatten_sections_overwrites_existing_conflicts(tmp_path):
     conv = EpubConverter()
-    existing = tmp_path / "1-getting-started-introduction.md"
+    existing = tmp_path / "1-getting-started.md"
     existing.write_text("old", encoding="utf-8")
 
     chapter_dir = tmp_path / "chapter-temp-0001"
@@ -231,6 +233,8 @@ def test_flatten_sections_overwrites_existing_conflicts(tmp_path):
 
     conv._flatten_sections([chapter], tmp_path)
 
-    new_file = tmp_path / "1-getting-started-introduction.md"
+    new_file = tmp_path / "1-getting-started.md"
     assert new_file.exists()
-    assert new_file.read_text(encoding="utf-8") == "intro"
+    new_content = new_file.read_text(encoding="utf-8")
+    assert "# Getting Started" in new_content
+    assert "intro" in new_content

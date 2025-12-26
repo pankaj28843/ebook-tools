@@ -28,6 +28,8 @@ class EpubChapter(BaseModel):
     title: str = Field(description="The chapter title")
     slug: str = Field(description="Slug used when deriving file names")
     working_dir: str = Field(description="Temporary directory used while constructing sections")
+    output_filename: str | None = Field(default=None, description="Final markdown filename for this chapter")
+    output_path: str | None = Field(default=None, description="Absolute path to the chapter markdown file")
     sections: list[EpubSection] = Field(description="List of sections in this chapter")
     source_file: str = Field(description="Original EPUB source file name")
 

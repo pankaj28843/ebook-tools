@@ -15,7 +15,7 @@ async def test_collect_sections_without_h2(tmp_path):
     sections = await converter._collect_sections(soup, "Chapter Title", soup.find("h1"), chapter_dir)
     assert len(sections) == 1
     section = sections[0]
-    assert section.slug_hint == "full-chapter"
+    assert section.slug_hint == "chapter-title"
     assert section.title == "Chapter Title"
 
 
@@ -26,12 +26,11 @@ async def test_introduction_includes_nodes_before_first_h2(tmp_path):
     soup = BeautifulSoup(html, "html.parser")
     chapter_dir = tmp_path / "chapter-temp-0002"
     chapter_dir.mkdir()
-    section_headings = soup.find_all("h2")
 
-    sections = await converter._collect_structured_sections(
+    sections = await converter._collect_sections(
         soup,
+        "Chapter",
         soup.find("h1"),
-        section_headings,
         chapter_dir,
     )
 

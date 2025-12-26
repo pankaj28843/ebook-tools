@@ -70,7 +70,11 @@ def test_flatten_sections_moves_files_and_cleans_temp(tmp_path):
     conv._flatten_sections([chapter], tmp_path)
 
     assert not chapter_dir.exists()
-    flattened = Path(chapter.sections[0].file_path)
+    flattened = Path(chapter.output_path)
     assert flattened.parent == tmp_path
-    assert flattened.name.startswith("1-my-chapter-a-section")
+    assert flattened.name == "1-my-chapter.md"
+    contents = flattened.read_text(encoding="utf-8")
+    assert "# My Chapter" in contents
+    assert "intro" in contents.lower()
     assert chapter.slug == "my-chapter"
+    assert chapter.sections[0].file_path == str(flattened)

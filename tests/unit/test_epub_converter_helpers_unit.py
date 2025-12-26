@@ -9,7 +9,6 @@ import pytest
 
 from ebook_tools.epub_converter import EpubConverter
 from ebook_tools.epub_models import EpubChapter, EpubSection
-from ebook_tools.toc_checker import TocEntry
 
 
 @pytest.fixture
@@ -75,12 +74,22 @@ class TestEpubConverterHelpers:
 
         converter._flatten_sections([chapter, chapter2], tmp_path)
 
-        first_section_path = Path(chapter.sections[0].file_path)
-        second_section_path = Path(chapter2.sections[0].file_path)
-        assert first_section_path.parent == tmp_path
-        assert second_section_path.parent == tmp_path
-        assert first_section_path.name.startswith("1-getting-started-introduction")
-        assert second_section_path.name.startswith("2-advanced-section")
+        first_chapter_path = Path(chapter.output_path)
+        second_chapter_path = Path(chapter2.output_path)
+
+        assert first_chapter_path.parent == tmp_path
+        assert second_chapter_path.parent == tmp_path
+        assert first_chapter_path.name == "1-getting-started.md"
+        assert second_chapter_path.name == "2-advanced.md"
+        first_content = first_chapter_path.read_text(encoding="utf-8")
+        second_content = second_chapter_path.read_text(encoding="utf-8")
+        assert "# Getting Started" in first_content
+        assert "intro" in first_content
+        assert "content" in second_content
+
+        assert chapter.sections[0].file_path == str(first_chapter_path)
+        assert chapter2.sections[0].file_path == str(second_chapter_path)
+
         assert not Path(chapter.working_dir).exists()
         assert not Path(chapter2.working_dir).exists()
 

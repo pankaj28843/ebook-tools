@@ -1,6 +1,6 @@
 # ebook-tools
 
-Standalone ebook and PDF to Markdown converters extracted from docs-mcp-server. Use these CLIs to build filesystem tenants (`mcp-data/<codename>`) without pulling the full MCP server dependencies.
+Standalone ebook and PDF to Markdown converters extracted from docs-mcp-server. Use these CLIs to build deterministic Markdown trees (`./converted-docs/<slug>` by default) without pulling the full MCP server dependencies.
 
 ## Quickstart
 
@@ -10,4 +10,4 @@ uv sync
 uv run convert-docs --help
 ```
 
-Use `uv run convert-docs --input book.epub --output ./mcp-data/my-book` to produce the Markdown tree; the CLI will derive a codename automatically (override with `--codename my-book`) and update `deployment.json` unless you pass `--skip-deployment-update`. Additional helpers like `check-epub-toc` and `debug-epub-conversions` live in the same package.
+Use `uv run convert-docs --input book.epub --output ./converted/my-book` to produce the Markdown tree. When `--output` is omitted the CLI writes to `./converted-docs/<slug>` based on the input filename, so operators can run quick conversions without planning directories. Additional helpers like `check-epub-toc` and `debug-epub-conversions` live in the same package.

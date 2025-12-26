@@ -27,14 +27,11 @@ async def test_collect_structured_sections_and_process_section(tmp_path):
     chapter_dir = tmp_path / "chapter-temp-0001"
     chapter_dir.mkdir()
 
-    # find headings
-    section_headings = soup.find_all("h2")
-
-    # collect structured sections
-    sections = await conv._collect_structured_sections(
+    # collect structured sections via the internal helper
+    sections = await conv._collect_sections(
         soup=soup,
+        chapter_title="Chapter Title",
         chapter_title_tag=soup.find("h1"),
-        section_headings=section_headings,
         chapter_dir=chapter_dir,
     )
 

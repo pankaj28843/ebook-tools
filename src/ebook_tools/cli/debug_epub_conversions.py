@@ -62,30 +62,30 @@ class JobRunner:
 
         results: list[JobResult] = []
         for index, epub_path in enumerate(epub_files, start=1):
-            codename = self._slugify(epub_path.stem)
-            job_output = self.output_dir / codename
-            job_log = self.logs_dir / f"{codename}-convert.log"
-            toc_report = self.logs_dir / f"{codename}-toc.json"
+            book_slug = self._slugify(epub_path.stem)
+            job_output = self.output_dir / book_slug
+            job_log = self.logs_dir / f"{book_slug}-convert.log"
+            toc_report = self.logs_dir / f"{book_slug}-toc.json"
 
             if job_output.exists() and self.overwrite:
                 shutil.rmtree(job_output)
             job_output.mkdir(parents=True, exist_ok=True)
 
             LOG.info("[%s/%s] Converting %s", index, len(epub_files), epub_path.name)
-            convert_cmd = self._build_convert_command(epub_path, job_output, codename)
+            convert_cmd = self._build_convert_command(epub_path, job_output)
             convert_rc = self._run_and_capture(convert_cmd, job_log)
             toc_rc: int | None = None
 
             if convert_rc == 0:
-                LOG.info("    Running TOC checker for %s", codename)
+                LOG.info("    Running TOC checker for %s", book_slug)
                 toc_cmd = self._build_toc_command(epub_path, job_output, toc_report)
                 toc_rc = self._run_and_capture(toc_cmd, job_log, append=True)
             else:
-                LOG.error("    Conversion failed for %s (see %s)", codename, job_log)
+                LOG.error("    Conversion failed for %s (see %s)", book_slug, job_log)
 
             results.append(
                 JobResult(
-                    name=codename,
+                    name=book_slug,
                     epub_path=epub_path,
                     output_dir=job_output,
                     convert_rc=convert_rc,
@@ -100,7 +100,7 @@ class JobRunner:
     def _find_epubs(self) -> list[Path]:
         return sorted([p for p in self.epub_dir.iterdir() if p.suffix.lower() == ".epub"])
 
-    def _build_convert_command(self, epub_path: Path, job_output: Path, codename: str) -> list[str]:
+    def _build_convert_command(self, epub_path: Path, job_output: Path) -> list[str]:
         return [
             "uv",
             "run",
@@ -109,8 +109,6 @@ class JobRunner:
             str(epub_path),
             "--output",
             str(job_output),
-            "--codename",
-            codename,
         ]
 
     def _build_toc_command(self, epub_path: Path, job_output: Path, report_path: Path) -> list[str]:

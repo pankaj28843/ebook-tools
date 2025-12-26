@@ -2,7 +2,8 @@
 EPUB to Structured Markdown Converter
 
 This module provides functionality to convert EPUB programming books into structured Markdown files.
-Each section becomes a numbered Markdown file in the root output directory using chapter/section slugs.
+Each chapter becomes a numbered Markdown file in the root output directory while still tracking
+per-section metadata for downstream tooling.
 
 The conversion preserves the original book's logical structure including:
 - Headings (h1, h2, h3, etc.)
@@ -483,40 +484,44 @@ class EpubConverter:
             claimed_ids.add(id(matched_chapter))
 
     def _flatten_sections(self, chapters: list[EpubChapter], output_dir: Path) -> None:
-        total_sections = sum(len(chapter.sections) for chapter in chapters)
-        if total_sections == 0:
-            for chapter in chapters:
-                shutil.rmtree(chapter.working_dir, ignore_errors=True)
+        if not chapters:
             return
 
-        padding = self._determine_padding(total_sections)
-        global_index = 1
+        padding = self._determine_padding(len(chapters))
 
-        for chapter in chapters:
-            first_index_for_chapter = global_index
-            chapter_slug = self._slugify(chapter.title, fallback="")
-            if not chapter_slug:
-                chapter_slug = f"chapter-{self._format_number(first_index_for_chapter, padding)}"
+        for index, chapter in enumerate(chapters, start=1):
+            chapter_slug = self._slugify(chapter.title, fallback=f"chapter-{self._format_number(index, padding)}")
             chapter.slug = chapter_slug[:80] or "chapter"
 
+            final_filename = f"{self._format_number(index, padding)}-{chapter.slug}.md"
+            final_path = output_dir / final_filename
+            if final_path.exists():
+                final_path.unlink()
+
+            content_parts: list[str] = []
+            chapter_title = chapter.title.strip()
+            if chapter_title:
+                content_parts.append(f"# {chapter_title}")
+
             for section in chapter.sections:
-                current_path = Path(section.file_path)
-                section_slug = self._slugify(section.slug_hint or section.title, fallback="section")
-                section_slug = section_slug[:80] or "section"
+                section_path = Path(section.file_path)
+                section_text = ""
+                if section_path.exists():
+                    section_text = section_path.read_text(encoding="utf-8").strip()
+                if section_text:
+                    content_parts.append(section_text)
 
-                prefix = self._format_number(global_index, padding)
-                suffix = current_path.suffix or ".md"
-                base_name = f"{chapter.slug}-{section_slug}".strip("-") or chapter.slug
-                new_filename = f"{prefix}-{base_name}{suffix}"
-                new_path = output_dir / new_filename
-                if new_path.exists():
-                    new_path.unlink()
+                section.filename = final_filename
+                section.file_path = str(final_path)
 
-                current_path.rename(new_path)
-                section.filename = new_filename
-                section.file_path = str(new_path)
+            combined = "\n\n".join(part for part in (part.strip() for part in content_parts) if part)
+            if not combined:
+                combined = f"# {chapter.title or 'Chapter'}"
 
-                global_index += 1
+            final_path.write_text(combined.rstrip() + "\n", encoding="utf-8")
+
+            chapter.output_filename = final_filename
+            chapter.output_path = str(final_path)
 
             shutil.rmtree(chapter.working_dir, ignore_errors=True)
 

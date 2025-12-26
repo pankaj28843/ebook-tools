@@ -2,12 +2,13 @@
 """Document Conversion Script for ebook-tools.
 
 🔄 Convert various document formats (EPUB, MOBI, PDF) to structured Markdown
-    that can be served via filesystem tenants managed in deployment.json.
+        that can be shared directly from the filesystem—no tenant metadata needed.
 
 Features:
 - Converts EPUB/PDF into a single-level Markdown directory with numbered files
 - Preserves the original reading order plus shared `images/` assets
-- Updates deployment.json automatically (or provides a snippet when skipped)
+- Derives a safe default output directory (`./converted-docs/<slug>`) when
+    `--output` is omitted
 - Non-interactive operation suitable for automation
 
 Usage:
@@ -23,24 +24,17 @@ Usage:
     # Inspect file before conversion
     uv run convert-docs --inspect book.epub
 
-    # Use custom output directory (default: ./converted-docs)
+    # Use custom output directory (default: ./converted-docs/<slug>)
     uv run convert-docs --input book.epub --output ./docs/my-book
-
-After conversion:
-1. The script updates deployment.json (override via --deployment-file)
-2. Pass --skip-deployment-update if you only want the Markdown tree
-3. Restart docs-mcp-server (or any consumer expecting filesystem tenants)
-4. Your book is now available at http://localhost:42042/{codename}/mcp
 """
 
 import argparse
 import asyncio
-import json
 import logging
 import re
 import sys
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Sequence
 
 from ebook_tools.epub_converter import EpubConverter, EpubConverterConfig
 from ebook_tools.epub_models import ConversionResult, EpubInfo, PdfInfo
@@ -72,36 +66,23 @@ SUPPORTED_FORMATS = {
 FUTURE_FORMATS = ["mobi"]
 
 
-def _slugify_codename(value: str | None) -> str | None:
-    """Normalize a value into a codename-friendly slug."""
+def _slugify_name(value: str | None) -> str:
     if not value:
-        return None
-
+        return "book"
     slug = value.strip().lower()
     slug = re.sub(r"[^a-z0-9]+", "-", slug)
     slug = re.sub(r"-+", "-", slug)
     slug = slug.strip("-")
-    return slug or None
+    return slug or "book"
 
 
-def _derive_codename(
-    provided_codename: str | None,
-    title: str | None,
-    input_path: Path,
-) -> tuple[str, str]:
-    """Return a codename plus the source that produced it."""
+def _determine_output_dir(input_path: Path, explicit_output: str | None) -> tuple[Path, bool]:
+    if explicit_output:
+        return Path(explicit_output).expanduser().resolve(), False
 
-    candidates = (
-        ("flag", provided_codename),
-        ("title", title),
-        ("filename", input_path.stem),
-    )
-    for source, candidate in candidates:
-        slug = _slugify_codename(candidate)
-        if slug:
-            return slug, source
-
-    return "book", "fallback"
+    default_base = Path.cwd() / "converted-docs"
+    slug = _slugify_name(input_path.stem)
+    return (default_base / slug).resolve(), True
 
 
 def detect_format(file_path: Path) -> str | None:
@@ -311,7 +292,6 @@ def print_epub_info(info: EpubInfo):
 async def convert_epub_to_markdown(
     input_path: Path,
     output_dir: Path,
-    codename: str,
     title: str | None = None,
     config: EpubConverterConfig | None = None,
 ) -> ConversionResult | None:
@@ -336,7 +316,6 @@ async def convert_epub_to_markdown(
 async def convert_pdf_to_markdown(
     input_path: Path,
     output_dir: Path,
-    codename: str,
     title: str | None = None,
     config: PdfConverterConfig | None = None,
 ) -> ConversionResult | None:
@@ -358,104 +337,6 @@ async def convert_pdf_to_markdown(
         return None
 
 
-def generate_deployment_snippet(
-    codename: str,
-    docs_name: str,
-    output_dir: Path,
-) -> dict[str, Any]:
-    """Generate deployment.json snippet for the converted docs."""
-    # Convert absolute path to relative from project root or ~/relative if it's under home directory
-    absolute_path = output_dir.resolve()
-    cwd_path = Path.cwd()
-    home_path = Path.home()
-
-    try:
-        # First try to make it relative to current working directory (project root)
-        relative_to_cwd = absolute_path.relative_to(cwd_path)
-        docs_root_path = f"./{relative_to_cwd}"
-    except ValueError:
-        try:
-            # If not under cwd, try to make it relative to home directory
-            relative_to_home = absolute_path.relative_to(home_path)
-            docs_root_path = f"~/{relative_to_home}"
-        except ValueError:
-            # If neither works, use absolute path
-            docs_root_path = str(absolute_path)
-
-    return {
-        "source_type": "filesystem",
-        "codename": codename,
-        "docs_name": docs_name,
-        "docs_root_dir": docs_root_path,
-    }
-
-
-def _load_manifest(manifest_path: Path) -> tuple[dict[str, Any], bool]:
-    if not manifest_path.exists():
-        return {"tenants": []}, True
-
-    try:
-        with manifest_path.open("r", encoding="utf-8") as file:
-            data = json.load(file)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"deployment manifest {manifest_path} is not valid JSON") from exc
-
-    if not isinstance(data, dict):
-        raise RuntimeError(f"deployment manifest {manifest_path} must contain a top-level JSON object")
-
-    tenants = data.get("tenants")
-    if tenants is None:
-        data["tenants"] = []
-    elif not isinstance(tenants, list):
-        raise RuntimeError(f"deployment manifest {manifest_path} must store 'tenants' as a list")
-
-    return data, False
-
-
-def update_deployment_manifest(manifest_path: Path, tenant_entry: dict[str, Any]) -> str:
-    """Create or update the deployment manifest with the provided tenant."""
-
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    data, created = _load_manifest(manifest_path)
-    tenants: list[Any] = data["tenants"]
-    codename = tenant_entry["codename"]
-
-    replaced = False
-    for index, tenant in enumerate(tenants):
-        if isinstance(tenant, dict) and tenant.get("codename") == codename:
-            tenants[index] = tenant_entry
-            replaced = True
-            break
-
-    if not replaced:
-        tenants.append(tenant_entry)
-
-    with manifest_path.open("w", encoding="utf-8") as file:
-        json.dump(data, file, indent=2)
-        file.write("\n")
-
-    if created:
-        return f"created new manifest with tenant '{codename}'"
-
-    if replaced:
-        return f"updated tenant '{codename}'"
-
-    return f"appended tenant '{codename}'"
-
-
-def print_deployment_summary(action: str, manifest_path: Path, codename: str, skipped: bool) -> None:
-    """Print a succinct deployment summary."""
-
-    print("📦 Deployment Manifest:\n")
-    print(f"  File:   {manifest_path}")
-    print(f"  Tenant: {codename}")
-    if skipped:
-        print("  Action: skipped (--skip-deployment-update)")
-    else:
-        print(f"  Action: {action}")
-    print()
-
-
 def print_conversion_summary(result: ConversionResult):
     """Print conversion statistics."""
     print("\n📊 Conversion Statistics:\n")
@@ -468,17 +349,26 @@ def print_conversion_summary(result: ConversionResult):
     output_path = Path(result.output_directory)
     images_dir = output_path / "images"
 
-    all_files = [Path(section.file_path).name for chapter in result.chapters for section in chapter.sections]
-    all_files.sort()
-    preview_files = all_files[:5]
-    remaining = max(len(all_files) - len(preview_files), 0)
+    chapter_files: list[str] = []
+    for chapter in result.chapters:
+        chapter_path: Path | None = None
+        if chapter.output_path:
+            chapter_path = Path(chapter.output_path)
+        elif chapter.sections:
+            chapter_path = Path(chapter.sections[0].file_path)
+        if chapter_path:
+            chapter_files.append(chapter_path.name)
+
+    unique_files = sorted(dict.fromkeys(chapter_files))
+    preview_files = unique_files[:5]
+    remaining = max(len(unique_files) - len(preview_files), 0)
 
     entries: list[str] = []
     if images_dir.exists():
         entries.append("images/")
     entries.extend(preview_files)
     if remaining:
-        entries.append(f"... ({remaining} more files)")
+        entries.append(f"... ({remaining} more chapter files)")
     if not entries:
         entries.append("(no markdown files emitted)")
 
@@ -536,29 +426,15 @@ async def main_async(args):  # noqa: PLR0911 - CLI function with multiple exit p
                 return 0
         return 1
 
-    codename, codename_source = _derive_codename(args.codename, args.title, input_path)
-
-    # Determine output directory
-    if args.output:
-        output_dir = Path(args.output).expanduser().resolve()
-    else:
-        # Default: ./mcp-data/{codename} (in current project directory)
-        default_base = Path.cwd() / "converted-docs"
-        output_dir = default_base / codename
+    output_dir, auto_output = _determine_output_dir(input_path, args.output)
+    if auto_output:
         logger.info(f"Using default output directory: {output_dir}")
 
-    # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"📂 Output: {output_dir}")
-    codename_notes = {
-        "flag": "",
-        "title": " (auto-derived from title)",
-        "filename": " (auto-derived from filename)",
-        "fallback": " (auto-derived fallback)",
-    }
-    note = codename_notes.get(codename_source, "")
-    print(f"🏷️  Codename: {codename}{note}")
+    if auto_output:
+        print("    (auto-derived from input filename)")
 
     if args.title:
         print(f"📖 Title: {args.title}")
@@ -577,7 +453,6 @@ async def main_async(args):  # noqa: PLR0911 - CLI function with multiple exit p
         result = await convert_epub_to_markdown(
             input_path=input_path,
             output_dir=output_dir,
-            codename=codename,
             title=args.title,
             config=config,
         )
@@ -592,7 +467,6 @@ async def main_async(args):  # noqa: PLR0911 - CLI function with multiple exit p
         result = await convert_pdf_to_markdown(
             input_path=input_path,
             output_dir=output_dir,
-            codename=codename,
             title=args.title,
             config=config_pdf,
         )
@@ -605,22 +479,6 @@ async def main_async(args):  # noqa: PLR0911 - CLI function with multiple exit p
     print_conversion_summary(result)
     print_success_banner()
 
-    deployment_file_arg = getattr(args, "deployment_file", Path("deployment.json"))
-    deployment_file = Path(deployment_file_arg).expanduser().resolve()
-    snippet = generate_deployment_snippet(
-        codename=codename,
-        docs_name=args.title or result.book_title,
-        output_dir=output_dir,
-    )
-
-    skipped = bool(getattr(args, "skip_deployment_update", False))
-    if skipped:
-        action = "skipped"
-    else:
-        action = update_deployment_manifest(deployment_file, snippet)
-
-    print_deployment_summary(action=action, manifest_path=deployment_file, codename=codename, skipped=skipped)
-
     return 0
 
 
@@ -632,11 +490,11 @@ def parse_cli_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Convert EPUB to Markdown
-  %(prog)s --input book.epub --output ./docs/my-book --codename my-book
+    # Convert EPUB to Markdown
+    %(prog)s --input book.epub --output ./docs/my-book
 
-  # Convert with custom title
-  %(prog)s --input guide.epub --output ./docs/guide --codename guide --title "My Guide"
+    # Convert with custom title
+    %(prog)s --input guide.epub --output ./docs/guide --title "My Guide"
 
   # Inspect file before conversion
   %(prog)s --inspect book.epub
@@ -657,13 +515,7 @@ For more information, see: https://github.com/pankaj28843/docs-mcp-server
     parser.add_argument(
         "--output",
         "-o",
-        help="Output directory for converted Markdown (default: ./mcp-data/{codename})",
-    )
-
-    parser.add_argument(
-        "--codename",
-        "-c",
-        help="Tenant codename for deployment.json (required for conversion)",
+        help="Output directory for converted Markdown (default: ./converted-docs/<slug>)",
     )
 
     parser.add_argument(
@@ -682,19 +534,6 @@ For more information, see: https://github.com/pankaj28843/docs-mcp-server
         "--list-formats",
         action="store_true",
         help="List all supported document formats",
-    )
-
-    parser.add_argument(
-        "--deployment-file",
-        type=Path,
-        default=Path("deployment.json"),
-        help="Path to the deployment manifest to update (default: ./deployment.json)",
-    )
-
-    parser.add_argument(
-        "--skip-deployment-update",
-        action="store_true",
-        help="Skip writing deployment manifest updates after conversion",
     )
 
     parser.add_argument(
@@ -723,9 +562,6 @@ def main(argv: Sequence[str] | None = None):
     args = parse_cli_args(argv)
 
     # Validate argument combinations
-    if args.inspect and args.codename:
-        print("⚠️  --codename is ignored when using --inspect")
-
     if args.inspect and args.output:
         print("⚠️  --output is ignored when using --inspect")
 

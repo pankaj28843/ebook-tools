@@ -20,7 +20,7 @@ argument-hint: feature="footnote support" scope="epub_converter.py, convert_docs
    uv run ruff format .
    uv run ruff check --fix .
    timeout 60 uv run pytest --maxfail=1 --disable-warnings --cov=src/ebook_tools --cov-report=term-missing
-   uv run convert-docs --input tests/data/sample.epub --output /tmp/out --codename feature-smoke [--new-flag]
+   uv run convert-docs --input tests/data/sample.epub --output /tmp/out [--new-flag]
    ```
 
 ## Output

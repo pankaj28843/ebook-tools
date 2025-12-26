@@ -287,13 +287,16 @@ class TestPdfConverterFlattening:
         converter._flatten_sections([chapter], tmp_path)
 
         generated = sorted(tmp_path.glob("*.md"))
-        assert generated[0].name.startswith("1-intro-chapter-alpha")
-        assert generated[1].name.startswith("2-intro-chapter-second-section")
+        assert len(generated) == 1
+        assert generated[0].name == "1-intro-chapter.md"
+        content = generated[0].read_text(encoding="utf-8")
+        assert "alpha" in content
+        assert "beta" in content
         assert not Path(chapter.working_dir).exists()
 
     def test_flatten_sections_replaces_existing_files(self, tmp_path: Path):
         converter = PdfConverter()
-        existing = tmp_path / "1-intro-chapter-alpha.md"
+        existing = tmp_path / "1-intro-chapter.md"
         existing.write_text("old", encoding="utf-8")
 
         chapter_dir = tmp_path / "chapter-temp-0001"
@@ -320,9 +323,11 @@ class TestPdfConverterFlattening:
 
         converter._flatten_sections([chapter], tmp_path)
 
-        new_file = tmp_path / "1-intro-chapter-intro.md"
+        new_file = tmp_path / "1-intro-chapter.md"
         assert new_file.exists()
-        assert new_file.read_text(encoding="utf-8") == "alpha"
+        new_content = new_file.read_text(encoding="utf-8")
+        assert "# Intro Chapter" in new_content
+        assert "alpha" in new_content
 
     def test_add_code_language_hints(self):
         """Test adding language hints to code fences."""
@@ -357,20 +362,20 @@ another code block
 
         content = """# Chapter
 
-Some text.
+    Some text.
 
-![Figure 1](image1.png)
+    ![Figure 1](image1.png)
 
-More text.
+    More text.
 
-![Figure 2](image2.png)
-"""
+    ![Figure 2](image2.png)
+    """
 
-    result = converter._fix_image_paths(content)
+        result = converter._fix_image_paths(content)
 
-    # Images should be rewritten to the root images/ folder
-    assert "![Figure 1](images/image1.png)" in result
-    assert "![Figure 2](images/image2.png)" in result
+        # Images should be rewritten to the root images/ folder
+        assert "![Figure 1](images/image1.png)" in result
+        assert "![Figure 2](images/image2.png)" in result
 
     def test_fix_image_paths_preserves_absolute_paths(self):
         """Test that absolute paths are not modified."""
@@ -395,6 +400,47 @@ More text.
 
         # Should not modify when preserve_images is False
         assert result == content
+
+    def test_flatten_sections_zero_pads_double_digit_chapters(self, tmp_path: Path):
+        converter = PdfConverter()
+        chapters: list[EpubChapter] = []
+
+        for idx in range(1, 13):
+            chapter_dir = tmp_path / f"chapter-temp-{idx:04d}"
+            chapter_dir.mkdir()
+            section_path = chapter_dir / "section-temp-0001.md"
+            section_path.write_text(f"Section {idx}", encoding="utf-8")
+
+            section = EpubSection(
+                title=f"Section {idx}",
+                filename=section_path.name,
+                file_path=str(section_path),
+                word_count=2,
+                character_count=10,
+                slug_hint=f"section-{idx}",
+            )
+
+            chapters.append(
+                EpubChapter(
+                    title=f"Chapter {idx}",
+                    slug="temp",
+                    working_dir=str(chapter_dir),
+                    sections=[section],
+                    source_file="book.pdf",
+                )
+            )
+
+        converter._flatten_sections(chapters, tmp_path)
+
+        expected_files = [f"{idx:02d}-chapter-{idx}.md" for idx in range(1, 13)]
+        assert sorted(f.name for f in tmp_path.glob("*.md")) == expected_files
+
+        for idx, chapter in enumerate(chapters, start=1):
+            expected = expected_files[idx - 1]
+            assert chapter.output_filename == expected
+            assert Path(chapter.output_path).name == expected
+            assert chapter.sections[0].filename == expected
+            assert Path(chapter.sections[0].file_path).name == expected
 
     def test_split_markdown_by_heading_groups_sections(self):
         """Split text with intro and multiple headings into sections."""
@@ -452,6 +498,23 @@ Content for the second section."""
         # Chapter 3: pages 49-100 (to end)
         assert chapters_info[2] == ("Chapter 3", 49, 100)
 
+    def test_extract_chapters_info_handles_extended_outline_payload(self):
+        converter = PdfConverter(PdfConverterConfig(use_pdf_outlines=True))
+
+        mock_doc = Mock()
+        mock_doc.page_count = 75
+        mock_doc.get_toc.return_value = [
+            [1, "Chapter 1", 1, "dest", None, None],
+            [1, "Chapter 2", 30, "dest", None, None],
+        ]
+
+        chapters_info = converter._extract_chapters_info(mock_doc)
+
+        assert chapters_info == [
+            ("Chapter 1", 0, 29),
+            ("Chapter 2", 29, 75),
+        ]
+
     def test_extract_chapters_info_without_outline(self):
         """Test chapter extraction fallback when no outline."""
         converter = PdfConverter(PdfConverterConfig(use_pdf_outlines=True))
@@ -484,6 +547,20 @@ Content for the second section."""
         # Should ignore outline and return full document
         assert len(chapters_info) == 1
         assert chapters_info[0] == ("Full Document", 0, 50)
+
+    def test_extract_chapters_info_handles_outline_without_level_one_entries(self):
+        converter = PdfConverter(PdfConverterConfig(use_pdf_outlines=True))
+
+        mock_doc = Mock()
+        mock_doc.page_count = 42
+        mock_doc.get_toc.return_value = [
+            [2, "Section 1.1", 5],
+            [3, "Section 1.1.1", 7],
+        ]
+
+        chapters_info = converter._extract_chapters_info(mock_doc)
+
+        assert chapters_info == [("Full Document", 0, 42)]
 
 
 @pytest.mark.unit
@@ -526,6 +603,30 @@ class TestPdfConverterAsync:
         )
 
         assert result is None
+
+    async def test_create_section_file_persists_content(self, tmp_path: Path):
+        converter = PdfConverter()
+        chapter_dir = tmp_path / "chapter"
+        chapter_dir.mkdir()
+
+        raw_content = "Intro copy.\n\n![Diagram](fig.png)"
+        expected_content = converter._fix_image_paths(raw_content)
+
+        section = await converter._create_section_file(
+            section_title="Fancy Section",
+            section_content=raw_content,
+            section_index=3,
+            chapter_dir=chapter_dir,
+        )
+
+        assert section is not None
+        file_path = Path(section.file_path)
+        assert file_path.exists()
+        assert file_path.read_text(encoding="utf-8") == expected_content
+        assert section.filename == "section-temp-0003.md"
+        assert section.slug_hint == "fancy-section"
+        assert section.word_count == len(expected_content.split())
+        assert section.character_count == len(expected_content)
 
     async def test_convert_pdf_to_markdown_reports_markdown_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -655,15 +756,16 @@ class TestPdfConverterAsync:
         assert result.toc_json_path is None
 
         flattened = sorted(f.name for f in output_dir.glob("*.md"))
-        assert flattened[:2] == ["1-chapter-one-section-alpha.md", "2-chapter-one-section-beta.md"]
-        assert flattened[2:] == ["3-chapter-two-section-alpha.md", "4-chapter-two-section-beta.md"]
+        assert flattened == ["1-chapter-one.md", "2-chapter-two.md"]
 
         first_chapter = result.chapters[0]
         assert first_chapter.slug == "chapter-one"
         assert not Path(first_chapter.working_dir).exists()
+        assert first_chapter.output_filename == "1-chapter-one.md"
+        assert Path(first_chapter.output_path).exists()
         first_section = first_chapter.sections[0]
-        assert first_section.filename == "1-chapter-one-section-alpha.md"
-        assert Path(first_section.file_path).exists()
+        assert first_section.filename == "1-chapter-one.md"
+        assert Path(first_section.file_path) == Path(first_chapter.output_path)
 
     @pytest.mark.asyncio
     async def test_convert_pdf_to_markdown_propagates_fitz_errors(

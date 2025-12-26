@@ -21,7 +21,7 @@ argument-hint: file="src/ebook_tools/epub_converter.py" repro="convert-docs --in
 4. Validate:
    ```bash
    timeout 60 uv run pytest --maxfail=1 --disable-warnings --cov=src/ebook_tools --cov-report=term-missing -k <test>
-   uv run convert-docs --input ... --output ... --codename bugfix-smoke  # if the bug surfaced via CLI
+   uv run convert-docs --input ... --output ...  # if the bug surfaced via CLI
    ```
 5. Summarize root cause, fix, and commands executed.
 

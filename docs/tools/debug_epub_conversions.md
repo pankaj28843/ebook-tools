@@ -15,7 +15,7 @@ Coordinates the workflow:
 
 ### `JobResult`
 Dataclass capturing:
-- `name`: slugified book codename.
+- `name`: slugified book name derived from the source filename.
 - `epub_path`, `output_dir`, `convert_log`.
 - `toc_report`: JSON report emitted by `check-epub-toc` when validation succeeds.
 - Convenience property `ok` that returns `True` only when the conversion succeeded and, if run, the TOC checker passed.
@@ -43,7 +43,7 @@ Dataclass capturing:
 ## Architecture
 - Lives alongside other developer tooling at the repo root yet depends only on top-level scripts (`convert-docs`, `check-epub-toc`).
 - Designed for long-running QA batches: all subprocess calls use `uv run` so they share the managed Python environment.
-- Log layout mirrors what CI pipelines expect (`logs/<codename>-convert.log`, `logs/<codename>-toc.json`).
+- Log layout mirrors what CI pipelines expect (`logs/<slug>-convert.log`, `logs/<slug>-toc.json`).
 
 ## Testing
 Not currently covered by automated tests. Treat it as an operational helper; when modifying behavior, dry-run against a pair of small EPUBs and inspect the emitted JSON summary plus logs to ensure backwards-compatible reporting.
@@ -63,4 +63,4 @@ Not currently covered by automated tests. Treat it as an operational helper; whe
 ### TOC report missing in results
 **Cause:** `check-epub-toc` only writes `--json-report` when the conversion succeeds and the report flag is set.
 
-**Solution:** Inspect `<logs>/<codename>-convert.log` for conversion errors. When success is expected, confirm the `toc_rc` column is `0`; otherwise the script skips storing `toc_report`.
+**Solution:** Inspect `<logs>/<slug>-convert.log` for conversion errors. When success is expected, confirm the `toc_rc` column is `0`; otherwise the script skips storing `toc_report`.

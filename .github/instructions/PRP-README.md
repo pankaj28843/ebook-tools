@@ -28,7 +28,7 @@ Skip PRPs for surgical edits confined to one file with obvious scope.
 uv run ruff format .
 uv run ruff check --fix .
 timeout 60 uv run pytest --maxfail=1 --disable-warnings --cov=src/ebook_tools --cov-report=term-missing
-uv run convert-docs --input tests/data/sample.epub --output /tmp/out --codename plan-smoke
+uv run convert-docs --input tests/data/sample.epub --output /tmp/out
 uv run check-epub-toc --nav tests/data/sample/nav.xhtml
 ```
 

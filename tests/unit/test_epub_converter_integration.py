@@ -32,6 +32,8 @@ async def test_convert_epub_to_markdown_minimal(tmp_path: Path):
 
     assert result.chapters_count >= 1
     assert result.sections_count >= 1
-    assert (output_dir / "README.md").exists()
-    assert (output_dir / "toc.json").exists()
-    assert any(folder.is_dir() for folder in output_dir.iterdir())
+
+    chapter_files = sorted(output_dir.glob("*.md"))
+    assert chapter_files, "expected at least one chapter markdown file"
+    first_chapter = chapter_files[0].read_text(encoding="utf-8")
+    assert "# Chapter" in first_chapter

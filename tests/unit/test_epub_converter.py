@@ -56,8 +56,10 @@ class TestEpubConverter:
                 assert result.book_title == "Test Book"
                 assert result.chapters_count == 1
                 assert result.sections_count == 1
-                assert (output_dir / "chapter-1").exists()
-                assert (output_dir / "chapter-1" / "1.1-full-chapter.md").exists()
+                chapter_file = output_dir / "1-chapter-1.md"
+                assert chapter_file.exists()
+                contents = chapter_file.read_text(encoding="utf-8")
+                assert "# Chapter 1" in contents
 
     @pytest.mark.asyncio
     async def test_process_chapter_with_sections(self, converter, tmp_path):

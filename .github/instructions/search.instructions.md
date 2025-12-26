@@ -52,7 +52,7 @@ timeout 60 uv run pytest tests/unit/test_pdf_converter.py -k chunk
 timeout 60 uv run pytest --maxfail=1 --disable-warnings --cov=src/ebook_tools --cov-report=term-missing
 
 # CLI smoke (EPUB)
-uv run convert-docs --input tests/data/sample.epub --output /tmp/out --codename sample
+uv run convert-docs --input tests/data/sample.epub --output /tmp/out
 
 # CLI smoke (TOC)
 uv run check-epub-toc --nav tests/data/sample/nav.xhtml
