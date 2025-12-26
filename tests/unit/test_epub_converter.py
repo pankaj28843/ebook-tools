@@ -2,12 +2,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ebook_tools.epub_converter import EpubConverter
+from ebook_tools.epub_converter import EpubConverter, EpubConverterConfig
 
 
 @pytest.fixture
 def converter():
-    return EpubConverter()
+    return EpubConverter(EpubConverterConfig(max_output_depth=1))
 
 
 @pytest.mark.unit

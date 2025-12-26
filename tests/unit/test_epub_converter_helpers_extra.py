@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ebook_tools.epub_converter import EpubConverter
+from ebook_tools.epub_converter import EpubConverter, EpubConverterConfig
 from ebook_tools.epub_models import EpubChapter, EpubSection
 
 
@@ -57,7 +57,7 @@ def test_determine_padding_and_format_number():
 
 
 def test_flatten_sections_moves_files_and_cleans_temp(tmp_path):
-    conv = EpubConverter()
+    conv = EpubConverter(EpubConverterConfig(max_output_depth=1))
 
     chapter_dir = tmp_path / "chapter-temp-0001"
     chapter_dir.mkdir()

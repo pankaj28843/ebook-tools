@@ -33,7 +33,14 @@ async def test_convert_epub_to_markdown_minimal(tmp_path: Path):
     assert result.chapters_count >= 1
     assert result.sections_count >= 1
 
-    chapter_files = sorted(output_dir.glob("*.md"))
-    assert chapter_files, "expected at least one chapter markdown file"
-    first_chapter = chapter_files[0].read_text(encoding="utf-8")
-    assert "# Chapter" in first_chapter
+    chapter_entries = sorted(path for path in output_dir.iterdir() if path.is_dir() or path.suffix == ".md")
+    assert chapter_entries, "expected markdown output"
+
+    if chapter_entries[0].is_dir():
+        section_files = sorted(chapter_entries[0].glob("*.md"))
+        assert section_files, "expected markdown files inside the chapter directory"
+        first_section = section_files[0].read_text(encoding="utf-8")
+    else:
+        first_section = chapter_entries[0].read_text(encoding="utf-8")
+
+    assert "# Chapter" in first_section or "##" in first_section

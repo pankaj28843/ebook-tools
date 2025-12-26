@@ -101,6 +101,7 @@ class TestPdfConverterConfig:
         assert config.max_section_depth == 2
         assert config.code_language is None
         assert config.heading_style == "ATX"
+        assert config.max_output_depth == 2
 
     def test_custom_config(self):
         """Test custom configuration values."""
@@ -111,6 +112,7 @@ class TestPdfConverterConfig:
             max_section_depth=3,
             code_language="python",
             heading_style="setext",
+            max_output_depth=1,
         )
         assert config.preserve_images is False
         assert config.clean_filenames is False
@@ -118,6 +120,7 @@ class TestPdfConverterConfig:
         assert config.max_section_depth == 3
         assert config.code_language == "python"
         assert config.heading_style == "setext"
+        assert config.max_output_depth == 1
 
 
 @pytest.mark.unit
@@ -203,16 +206,13 @@ Section 2 content.
         sections = converter._split_markdown_by_heading(md_text, "Chapter 1")
         assert len(sections) == 3
 
-        # Introduction section
-        assert sections[0][0] == "Introduction"
+        titles = [title for title, _, _ in sections]
+        levels = [level for _, _, level in sections]
+
+        assert titles == ["Introduction", "Section 1", "Section 2"]
+        assert levels == [2, 2, 2]
         assert "Some intro text" in sections[0][1]
-
-        # Section 1
-        assert sections[1][0] == "Section 1"
         assert "Section 1 content" in sections[1][1]
-
-        # Section 2
-        assert sections[2][0] == "Section 2"
         assert "Section 2 content" in sections[2][1]
 
     def test_split_markdown_by_heading_no_sections(self):
@@ -225,8 +225,10 @@ All content in one section."""
 
         sections = converter._split_markdown_by_heading(md_text, "Chapter 1")
         assert len(sections) == 1
-        assert sections[0][0] == "Chapter 1"
-        assert "All content in one section" in sections[0][1]
+        title, content, level = sections[0]
+        assert title == "Chapter 1"
+        assert "All content in one section" in content
+        assert level == 2
 
     def test_split_markdown_by_heading_no_intro(self):
         """Test markdown starting with ## heading."""
@@ -243,15 +245,15 @@ Section 2 content.
 
         sections = converter._split_markdown_by_heading(md_text, "Chapter 1")
         assert len(sections) == 2
-        assert sections[0][0] == "Section 1"
-        assert sections[1][0] == "Section 2"
+        titles = [title for title, _, _ in sections]
+        assert titles == ["Section 1", "Section 2"]
 
 
 class TestPdfConverterFlattening:
     """Covers the flattened output helpers."""
 
     def test_flatten_sections_orders_files(self, tmp_path: Path):
-        converter = PdfConverter()
+        converter = PdfConverter(PdfConverterConfig(max_output_depth=1))
         chapter_dir = tmp_path / "chapter-temp-0001"
         chapter_dir.mkdir()
         section_one = chapter_dir / "section-temp-0001.md"
@@ -295,7 +297,7 @@ class TestPdfConverterFlattening:
         assert not Path(chapter.working_dir).exists()
 
     def test_flatten_sections_replaces_existing_files(self, tmp_path: Path):
-        converter = PdfConverter()
+        converter = PdfConverter(PdfConverterConfig(max_output_depth=1))
         existing = tmp_path / "1-intro-chapter.md"
         existing.write_text("old", encoding="utf-8")
 
@@ -402,7 +404,7 @@ another code block
         assert result == content
 
     def test_flatten_sections_zero_pads_double_digit_chapters(self, tmp_path: Path):
-        converter = PdfConverter()
+        converter = PdfConverter(PdfConverterConfig(max_output_depth=1))
         chapters: list[EpubChapter] = []
 
         for idx in range(1, 13):
@@ -442,6 +444,82 @@ another code block
             assert chapter.sections[0].filename == expected
             assert Path(chapter.sections[0].file_path).name == expected
 
+    def test_structured_output_creates_chapter_directories(self, tmp_path: Path):
+        converter = PdfConverter(PdfConverterConfig(max_output_depth=2))
+        chapter_dir = tmp_path / "chapter-temp-0001"
+        chapter_dir.mkdir()
+        section_path = chapter_dir / "section-temp-0001.md"
+        section_path.write_text("Section One", encoding="utf-8")
+        section_two_path = chapter_dir / "section-temp-0002.md"
+        section_two_path.write_text("Section Two", encoding="utf-8")
+
+        section = EpubSection(
+            title="Section One",
+            filename=section_path.name,
+            file_path=str(section_path),
+            word_count=2,
+            character_count=10,
+            slug_hint="section-one",
+        )
+        section_two = EpubSection(
+            title="Section Two",
+            filename=section_two_path.name,
+            file_path=str(section_two_path),
+            word_count=2,
+            character_count=10,
+            slug_hint="section-two",
+        )
+
+        chapter = EpubChapter(
+            title="Chapter One",
+            slug="temp",
+            working_dir=str(chapter_dir),
+            sections=[section, section_two],
+            source_file="book.pdf",
+        )
+
+        converter._write_structured_sections([chapter], tmp_path)
+
+        final_dir = Path(chapter.output_path)
+        assert final_dir.is_dir()
+        files = sorted(final_dir.glob("*.md"))
+        assert [f.name for f in files] == ["1-section-one.md", "2-section-two.md"]
+        assert Path(section.file_path) == files[0]
+        assert Path(section_two.file_path) == files[1]
+
+    def test_structured_output_collapses_single_section(self, tmp_path: Path):
+        converter = PdfConverter(PdfConverterConfig(max_output_depth=2))
+
+        chapter_dir = tmp_path / "chapter-temp-0001"
+        chapter_dir.mkdir()
+        section_path = chapter_dir / "section-temp-0001.md"
+        section_path.write_text("Only section", encoding="utf-8")
+
+        section = EpubSection(
+            title="Solo",
+            filename=section_path.name,
+            file_path=str(section_path),
+            word_count=2,
+            character_count=10,
+            slug_hint="solo",
+        )
+
+        chapter = EpubChapter(
+            title="Single",
+            slug="temp",
+            working_dir=str(chapter_dir),
+            sections=[section],
+            source_file="book.pdf",
+        )
+
+        converter._write_structured_sections([chapter], tmp_path)
+
+        final_path = Path(chapter.output_path)
+        assert final_path.is_file()
+        assert final_path.parent == tmp_path
+        assert final_path.name == "1-single.md"
+        assert Path(section.file_path) == final_path
+
     def test_split_markdown_by_heading_groups_sections(self):
         """Split text with intro and multiple headings into sections."""
         converter = PdfConverter()
@@ -455,12 +533,14 @@ Content for the first section.
 Content for the second section."""
 
         sections = converter._split_markdown_by_heading(md_text, "Chapter Title")
+        titles = [title for title, _, _ in sections]
+        levels = [level for _, _, level in sections]
 
-        assert sections[0][0] == "Introduction"
+        assert titles == ["Introduction", "First Section", "Second Section"]
+        assert levels == [2, 2, 2]
         assert "introduction paragraph" in sections[0][1].lower()
-        assert sections[1][0] == "First Section"
         assert "first section" in sections[1][1]
-        assert sections[2][0] == "Second Section"
+        assert "Second Section" in sections[2][1]
 
     def test_split_markdown_by_heading_without_sections_returns_full_content(self):
         """If no headings appear, return a single section using the chapter title."""
@@ -469,7 +549,7 @@ Content for the second section."""
 
         sections = converter._split_markdown_by_heading(content, "Solo Chapter")
 
-        assert sections == [("Solo Chapter", content)]
+        assert sections == [("Solo Chapter", content, 2)]
 
     def test_extract_chapters_info_with_outline(self):
         """Test chapter extraction from PDF outline."""
@@ -587,6 +667,7 @@ class TestPdfConverterAsync:
             section_content="",
             section_index=1,
             chapter_dir=Path("/tmp/chapter"),
+            level=2,
         )
 
         assert result is None
@@ -600,6 +681,7 @@ class TestPdfConverterAsync:
             section_content="   \n\n   ",
             section_index=1,
             chapter_dir=Path("/tmp/chapter"),
+            level=2,
         )
 
         assert result is None
@@ -617,6 +699,7 @@ class TestPdfConverterAsync:
             section_content=raw_content,
             section_index=3,
             chapter_dir=chapter_dir,
+            level=2,
         )
 
         assert section is not None
@@ -699,8 +782,10 @@ class TestPdfConverterAsync:
         assert removed_paths, "Empty chapter folders should be cleaned up"
 
     @pytest.mark.asyncio
-    async def test_convert_pdf_to_markdown_flattens_sections(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-        """End-to-end conversion should produce flattened markdown files."""
+    async def test_convert_pdf_to_markdown_emits_structured_directories(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """End-to-end conversion should create chapter directories by default."""
         pdf_path = tmp_path / "book.pdf"
         pdf_path.write_text("fake-pdf", encoding="utf-8")
         output_dir = tmp_path / "output"
@@ -755,17 +840,60 @@ class TestPdfConverterAsync:
         assert result.table_of_contents_path is None
         assert result.toc_json_path is None
 
-        flattened = sorted(f.name for f in output_dir.glob("*.md"))
-        assert flattened == ["1-chapter-one.md", "2-chapter-two.md"]
+        chapter_dirs = sorted(path.name for path in output_dir.iterdir() if path.is_dir())
+        assert chapter_dirs == ["1-chapter-one", "2-chapter-two"]
 
         first_chapter = result.chapters[0]
         assert first_chapter.slug == "chapter-one"
         assert not Path(first_chapter.working_dir).exists()
-        assert first_chapter.output_filename == "1-chapter-one.md"
-        assert Path(first_chapter.output_path).exists()
+        assert first_chapter.output_filename is None
+        chapter_root = Path(first_chapter.output_path)
+        assert chapter_root.exists() and chapter_root.is_dir()
+        section_files = sorted(f.name for f in chapter_root.glob("*.md"))
+        assert section_files == ["1-section-alpha.md", "2-section-beta.md"]
         first_section = first_chapter.sections[0]
-        assert first_section.filename == "1-chapter-one.md"
-        assert Path(first_section.file_path) == Path(first_chapter.output_path)
+        assert first_section.filename == "1-section-alpha.md"
+        assert Path(first_section.file_path) == chapter_root / "1-section-alpha.md"
+
+    async def test_convert_pdf_to_markdown_supports_flat_mode(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        pdf_path = tmp_path / "book.pdf"
+        pdf_path.write_text("fake-pdf", encoding="utf-8")
+        output_dir = tmp_path / "flat"
+
+        class FakeDoc:
+            def __init__(self):
+                self.metadata = {"title": "PDF Title"}
+                self.page_count = 4
+                self.closed = False
+
+            def get_toc(self, simple: bool = False):
+                return [[1, "Only Chapter", 1]]
+
+            def close(self):
+                self.closed = True
+
+        fake_doc = FakeDoc()
+
+        def markdown_stub(doc, *, pages, page_chunks, write_images, image_path, image_format):
+            return "## Section Alpha\nBody\n## Section Beta\nMore"
+
+        monkeypatch.setattr("ebook_tools.pdf_converter.fitz.open", lambda _: fake_doc)
+        monkeypatch.setattr("ebook_tools.pdf_converter.pymupdf4llm.to_markdown", markdown_stub)
+
+        converter = PdfConverter(PdfConverterConfig(preserve_images=False, max_output_depth=1))
+        result = await converter.convert_pdf_to_markdown(pdf_path, output_dir)
+
+        flattened = sorted(f.name for f in output_dir.glob("*.md"))
+        assert flattened == ["1-only-chapter.md"]
+        assert result.chapters_count == 1
+
+        chapter = result.chapters[0]
+        assert chapter.output_filename == "1-only-chapter.md"
+        assert Path(chapter.output_path).name == "1-only-chapter.md"
 
     @pytest.mark.asyncio
     async def test_convert_pdf_to_markdown_propagates_fitz_errors(

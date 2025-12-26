@@ -5,7 +5,7 @@
         that can be shared directly from the filesystem—no tenant metadata needed.
 
 Features:
-- Converts EPUB/PDF into a single-level Markdown directory with numbered files
+- Emits EPUB/PDF conversions with configurable directory depth (default 2) so section files can live under chapter folders; pass `--max-output-depth=1` to keep the legacy flat layout
 - Preserves the original reading order plus shared `images/` assets
 - Derives a safe default output directory (`./converted-docs/<slug>`) when
     `--output` is omitted
@@ -26,6 +26,9 @@ Usage:
 
     # Use custom output directory (default: ./converted-docs/<slug>)
     uv run convert-docs --input book.epub --output ./docs/my-book
+
+    # Keep the legacy flat layout
+    uv run convert-docs --input guide.epub --max-output-depth 1
 """
 
 import argparse
@@ -349,15 +352,27 @@ def print_conversion_summary(result: ConversionResult):
     output_path = Path(result.output_directory)
     images_dir = output_path / "images"
 
+    def _display_entry(path: Path) -> str:
+        try:
+            rel = path.relative_to(output_path)
+        except ValueError:
+            rel = path
+        text = rel.as_posix()
+        return f"{text}/" if path.is_dir() else text
+
     chapter_files: list[str] = []
     for chapter in result.chapters:
         chapter_path: Path | None = None
         if chapter.output_path:
-            chapter_path = Path(chapter.output_path)
-        elif chapter.sections:
-            chapter_path = Path(chapter.sections[0].file_path)
-        if chapter_path:
-            chapter_files.append(chapter_path.name)
+            candidate = Path(chapter.output_path)
+            if candidate.exists():
+                chapter_path = candidate
+        if chapter_path is None and chapter.sections:
+            candidate = Path(chapter.sections[0].file_path)
+            if candidate.exists():
+                chapter_path = candidate
+        if chapter_path is not None:
+            chapter_files.append(_display_entry(chapter_path))
 
     unique_files = sorted(dict.fromkeys(chapter_files))
     preview_files = unique_files[:5]
@@ -388,6 +403,13 @@ async def main_async(args):  # noqa: PLR0911 - CLI function with multiple exit p
     if args.list_formats:
         list_supported_formats()
         return 0
+
+    max_output_depth = getattr(args, "max_output_depth", None)
+    if max_output_depth is None:
+        max_output_depth = 2
+    if max_output_depth < 1:
+        logger.warning("max-output-depth %s is invalid; defaulting to 1", max_output_depth)
+        max_output_depth = 1
 
     # Validate input file
     if not args.input:
@@ -439,6 +461,8 @@ async def main_async(args):  # noqa: PLR0911 - CLI function with multiple exit p
     if args.title:
         print(f"📖 Title: {args.title}")
 
+    print(f"🗂️  Max Depth: {max_output_depth}")
+
     print("\n⏳ Starting conversion...\n")
 
     # Perform conversion based on format
@@ -449,6 +473,7 @@ async def main_async(args):  # noqa: PLR0911 - CLI function with multiple exit p
             strip_unwanted_tags=True,
             preserve_images=True,
             clean_filenames=True,
+            max_output_depth=max_output_depth,
         )
         result = await convert_epub_to_markdown(
             input_path=input_path,
@@ -463,6 +488,7 @@ async def main_async(args):  # noqa: PLR0911 - CLI function with multiple exit p
             use_pdf_outlines=True,
             max_section_depth=2,
             code_language=None,
+            max_output_depth=max_output_depth,
         )
         result = await convert_pdf_to_markdown(
             input_path=input_path,
@@ -534,6 +560,15 @@ For more information, see: https://github.com/pankaj28843/docs-mcp-server
         "--list-formats",
         action="store_true",
         help="List all supported document formats",
+    )
+
+    parser.add_argument(
+        "--max-output-depth",
+        "--max-depth",
+        dest="max_output_depth",
+        type=int,
+        default=2,
+        help="Maximum directory depth for emitted Markdown (1 = legacy flat layout)",
     )
 
     parser.add_argument(

@@ -20,6 +20,7 @@ class EpubSection(BaseModel):
         default=None,
         description="Original heading fragment identifier used for nav-map alignment",
     )
+    level: int = Field(default=2, description="Heading depth used when building nested output trees")
 
 
 class EpubChapter(BaseModel):
@@ -29,7 +30,10 @@ class EpubChapter(BaseModel):
     slug: str = Field(description="Slug used when deriving file names")
     working_dir: str = Field(description="Temporary directory used while constructing sections")
     output_filename: str | None = Field(default=None, description="Final markdown filename for this chapter")
-    output_path: str | None = Field(default=None, description="Absolute path to the chapter markdown file")
+    output_path: str | None = Field(
+        default=None,
+        description="Absolute path to the chapter markdown file or directory root when structured output is enabled",
+    )
     sections: list[EpubSection] = Field(description="List of sections in this chapter")
     source_file: str = Field(description="Original EPUB source file name")
 

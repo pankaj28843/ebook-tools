@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from ebook_tools.cli import convert_docs
-from ebook_tools.epub_models import ConversionResult, EpubInfo, PdfInfo
+from ebook_tools.epub_models import ConversionResult, EpubChapter, EpubInfo, EpubSection, PdfInfo
 
 
 def _build_args(
@@ -21,6 +21,7 @@ def _build_args(
     inspect: bool = False,
     list_formats: bool = False,
     title: str | None = None,
+    max_output_depth: int = 2,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         input=input_path,
@@ -28,6 +29,7 @@ def _build_args(
         inspect=inspect,
         list_formats=list_formats,
         title=title,
+        max_output_depth=max_output_depth,
     )
 
 
@@ -261,6 +263,105 @@ async def test_main_async_runs_conversion(monkeypatch: pytest.MonkeyPatch, tmp_p
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_main_async_passes_max_depth(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    epub_path = tmp_path / "guide.epub"
+    epub_path.write_text("stub", encoding="utf-8")
+    output_dir = tmp_path / "output"
+    conversion = _make_conversion(output_dir)
+
+    convert_mock = AsyncMock(return_value=conversion)
+    monkeypatch.setattr(convert_docs, "convert_epub_to_markdown", convert_mock)
+    monkeypatch.setattr(convert_docs, "print_conversion_summary", lambda result: None)
+    monkeypatch.setattr(convert_docs, "print_success_banner", lambda: None)
+
+    args = _build_args(input_path=str(epub_path), output=str(output_dir), max_output_depth=1)
+
+    exit_code = await convert_docs.main_async(args)
+
+    assert exit_code == 0
+    config_arg = convert_mock.await_args.kwargs["config"]
+    assert getattr(config_arg, "max_output_depth") == 1
+
+
+class TestConvertDocsSummary:
+    @pytest.mark.unit
+    def test_print_conversion_summary_handles_external_paths(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        output_dir = tmp_path / "converted"
+        images_dir = output_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        outside_file = tmp_path / "outside.md"
+        outside_file.write_text("# Chapter", encoding="utf-8")
+
+        section = EpubSection(
+            title="Intro",
+            filename="section-temp-0001.md",
+            file_path=str(outside_file),
+            word_count=5,
+            character_count=20,
+            slug_hint="intro",
+            source_fragment=None,
+            level=2,
+        )
+        chapter = EpubChapter(
+            title="Detached",
+            slug="detached",
+            working_dir=str(tmp_path / "chapter-temp-0001"),
+            output_filename=None,
+            output_path=str(outside_file),
+            sections=[section],
+            source_file="chapter.xhtml",
+        )
+
+        result = ConversionResult(
+            book_title="Guide",
+            chapters_count=1,
+            sections_count=1,
+            output_directory=str(output_dir),
+            chapters=[chapter],
+            table_of_contents_path=None,
+            toc_json_path=None,
+        )
+
+        convert_docs.print_conversion_summary(result)
+        captured = capsys.readouterr().out
+        assert "outside.md" in captured
+        assert "images/" in captured
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_main_async_clamps_invalid_max_depth(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    epub_path = tmp_path / "guide.epub"
+    epub_path.write_text("stub", encoding="utf-8")
+    output_dir = tmp_path / "output"
+    conversion = _make_conversion(output_dir)
+
+    convert_mock = AsyncMock(return_value=conversion)
+    monkeypatch.setattr(convert_docs, "convert_epub_to_markdown", convert_mock)
+    monkeypatch.setattr(convert_docs, "print_conversion_summary", lambda result: None)
+    monkeypatch.setattr(convert_docs, "print_success_banner", lambda: None)
+
+    args = _build_args(input_path=str(epub_path), output=str(output_dir), max_output_depth=0)
+
+    with caplog.at_level(logging.WARNING):
+        exit_code = await convert_docs.main_async(args)
+
+    assert exit_code == 0
+    assert "defaulting to 1" in caplog.text
+    config_arg = convert_mock.await_args.kwargs["config"]
+    assert getattr(config_arg, "max_output_depth") == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_main_async_prints_title_when_provided(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -341,6 +442,13 @@ def test_parse_cli_args_supports_positional_input_for_conversion() -> None:
 
 
 @pytest.mark.unit
+def test_parse_cli_args_accepts_max_depth_flag() -> None:
+    args = convert_docs.parse_cli_args(["--max-output-depth", "5", "guide.epub"])
+
+    assert args.max_output_depth == 5
+
+
+@pytest.mark.unit
 def test_parse_cli_args_warns_when_conflicting_inputs(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.WARNING):
         args = convert_docs.parse_cli_args(["--input", "first.epub", "second.epub"])
@@ -401,6 +509,7 @@ def test_main_warns_when_inspect_with_output(
         inspect=True,
         list_formats=False,
         title=None,
+        max_output_depth=2,
     )
     monkeypatch.setattr(convert_docs, "parse_cli_args", lambda argv: fake_args)
 
@@ -429,6 +538,7 @@ def test_module_entrypoint_invokes_main(monkeypatch: pytest.MonkeyPatch) -> None
         list_formats=True,
         title=None,
         input_path=None,
+        max_output_depth=2,
     )
 
     def fake_parse_args(self, argv=None):

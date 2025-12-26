@@ -47,6 +47,11 @@ class PdfConverterConfig(BaseModel):
     max_section_depth: int = Field(default=2, description="Maximum heading depth (2 = split at h2)")
     code_language: str | None = Field(default=None, description="Default language for code blocks")
     heading_style: str = Field(default="ATX", description="Heading style for markdown (ATX uses # syntax)")
+    max_output_depth: int = Field(
+        default=2,
+        ge=1,
+        description="Maximum directory depth for emitted Markdown (1 preserves the flattened layout)",
+    )
 
 
 class PdfConverter:
@@ -95,7 +100,7 @@ class PdfConverter:
                 else:
                     shutil.rmtree(chapter.working_dir, ignore_errors=True)
 
-            self._flatten_sections(chapters, output_dir)
+            self._emit_output_files(chapters, output_dir)
             sections_count = sum(len(chapter.sections) for chapter in chapters)
         finally:
             doc.close()
@@ -192,12 +197,13 @@ class PdfConverter:
 
         chapter_sections: list[EpubSection] = []
         section_index = 1
-        for section_title, section_content in sections:
+        for section_title, section_content, section_level in sections:
             section = await self._create_section_file(
                 section_title=section_title,
                 section_content=section_content,
                 chapter_dir=chapter_dir,
                 section_index=section_index,
+                level=section_level,
             )
             if section:
                 chapter_sections.append(section)
@@ -211,44 +217,48 @@ class PdfConverter:
             source_file=pdf_filename,
         )
 
-    def _split_markdown_by_heading(self, md_text: str, chapter_title: str) -> list[tuple[str, str]]:
-        """Split markdown into sections using `##` headings (with intro fallback)."""
+    def _split_markdown_by_heading(self, md_text: str, chapter_title: str) -> list[tuple[str, str, int]]:
+        """Split markdown into sections using heading levels (with intro fallback)."""
 
-        heading_pattern = r"^##\s+(.+?)$"
+        heading_pattern = r"^(#{2,6})\s+(.+?)$"
         lines = md_text.split("\n")
-        sections: list[tuple[str, str]] = []
+        sections: list[tuple[str, str, int]] = []
         current_section_title: str | None = None
         current_section_lines: list[str] = []
         in_intro = True
+        current_section_level = 2
 
         for line in lines:
             match = re.match(heading_pattern, line)
             if match:
+                hashes = match.group(1)
+                heading_level = max(2, min(len(hashes), self.config.max_section_depth))
                 if in_intro and current_section_lines:
                     intro_content = "\n".join(current_section_lines).strip()
                     if intro_content:
-                        sections.append(("Introduction", intro_content))
+                        sections.append(("Introduction", intro_content, 2))
                 elif current_section_title and current_section_lines:
                     section_content = "\n".join(current_section_lines).strip()
                     if section_content:
-                        sections.append((current_section_title, section_content))
+                        sections.append((current_section_title, section_content, current_section_level))
 
-                current_section_title = match.group(1).strip()
+                current_section_title = match.group(2).strip()
                 current_section_lines = [line]
                 in_intro = False
+                current_section_level = heading_level
             else:
                 current_section_lines.append(line)
 
         if current_section_title and current_section_lines:
             section_content = "\n".join(current_section_lines).strip()
             if section_content:
-                sections.append((current_section_title, section_content))
+                sections.append((current_section_title, section_content, current_section_level))
         elif current_section_lines:
             content = "\n".join(current_section_lines).strip()
             if content:
-                sections.append((chapter_title, content))
+                sections.append((chapter_title, content, 2))
 
-        return sections or [(chapter_title, md_text)]
+        return sections or [(chapter_title, md_text, 2)]
 
     async def _create_section_file(
         self,
@@ -256,6 +266,7 @@ class PdfConverter:
         section_content: str,
         chapter_dir: Path,
         section_index: int,
+        level: int,
     ) -> EpubSection | None:
         """Write a temporary markdown file for a section."""
 
@@ -276,6 +287,7 @@ class PdfConverter:
             character_count=len(section_content),
             slug_hint=self._slugify(section_title, fallback="section"),
             source_fragment=None,
+            level=max(2, min(int(level), self.config.max_section_depth)),
         )
 
     def _fix_image_paths(self, content: str) -> str:
@@ -317,6 +329,72 @@ class PdfConverter:
         slug = self._clean_filename(text)
         return slug or fallback
 
+    def _emit_output_files(self, chapters: list[EpubChapter], output_dir: Path) -> None:
+        if self.config.max_output_depth <= 1:
+            self._flatten_sections(chapters, output_dir)
+        else:
+            self._write_structured_sections(chapters, output_dir)
+
+    def _write_structured_sections(self, chapters: list[EpubChapter], output_dir: Path) -> None:
+        if not chapters:
+            return
+
+        padding = self._determine_padding(len(chapters))
+
+        for index, chapter in enumerate(chapters, start=1):
+            existing_sections = [section for section in chapter.sections if Path(section.file_path).exists()]
+            if len(existing_sections) <= 1:
+                self._write_chapter_flat_file(chapter, output_dir, index, padding)
+                continue
+
+            chapter_slug = self._slugify(
+                chapter.title,
+                fallback=f"chapter-{self._format_number(index, padding)}",
+            )
+            chapter.slug = chapter_slug[:80] or "chapter"
+
+            chapter_dir = output_dir / f"{self._format_number(index, padding)}-{chapter.slug}"
+            if chapter_dir.exists():
+                shutil.rmtree(chapter_dir)
+            chapter_dir.mkdir(parents=True, exist_ok=True)
+
+            section_padding = self._determine_padding(len(existing_sections)) if existing_sections else 1
+            for section_index, section in enumerate(existing_sections, start=1):
+                self._move_section_file(
+                    section=section,
+                    destination_dir=chapter_dir,
+                    section_index=section_index,
+                    padding=section_padding,
+                )
+
+            chapter.output_filename = None
+            chapter.output_path = str(chapter_dir)
+
+            shutil.rmtree(chapter.working_dir, ignore_errors=True)
+
+    def _move_section_file(
+        self,
+        *,
+        section: EpubSection,
+        destination_dir: Path,
+        section_index: int,
+        padding: int,
+    ) -> None:
+        source_path = Path(section.file_path)
+        if not source_path.exists():
+            return
+
+        slug = self._slugify(section.slug_hint, fallback="section")
+        final_name = f"{self._format_number(section_index, padding)}-{slug[:80]}.md"
+        final_path = destination_dir / final_name
+        if final_path.exists():
+            final_path.unlink()
+
+        source_path.replace(final_path)
+
+        section.filename = final_name
+        section.file_path = str(final_path)
+
     def _determine_padding(self, count: int) -> int:
         if count < 10:
             return 1
@@ -325,6 +403,51 @@ class PdfConverter:
     def _format_number(self, value: int, width: int) -> str:
         return str(value).zfill(width) if width > 1 else str(value)
 
+    def _write_chapter_flat_file(
+        self,
+        chapter: EpubChapter,
+        output_dir: Path,
+        index: int,
+        padding: int,
+    ) -> None:
+        chapter_slug = self._slugify(
+            chapter.title,
+            fallback=f"chapter-{self._format_number(index, padding)}",
+        )
+        chapter.slug = chapter_slug[:80] or "chapter"
+
+        final_filename = f"{self._format_number(index, padding)}-{chapter.slug}.md"
+        final_path = output_dir / final_filename
+        if final_path.exists():
+            final_path.unlink()
+
+        content_parts: list[str] = []
+        chapter_title = chapter.title.strip()
+        if chapter_title:
+            content_parts.append(f"# {chapter_title}")
+
+        for section in chapter.sections:
+            section_path = Path(section.file_path)
+            section_text = ""
+            if section_path.exists():
+                section_text = section_path.read_text(encoding="utf-8").strip()
+            if section_text:
+                content_parts.append(section_text)
+
+            section.filename = final_filename
+            section.file_path = str(final_path)
+
+        combined = "\n\n".join(part for part in (part.strip() for part in content_parts) if part)
+        if not combined:
+            combined = f"# {chapter.title or 'Chapter'}"
+
+        final_path.write_text(combined.rstrip() + "\n", encoding="utf-8")
+
+        chapter.output_filename = final_filename
+        chapter.output_path = str(final_path)
+
+        shutil.rmtree(chapter.working_dir, ignore_errors=True)
+
     def _flatten_sections(self, chapters: list[EpubChapter], output_dir: Path) -> None:
         if not chapters:
             return
@@ -332,37 +455,4 @@ class PdfConverter:
         padding = self._determine_padding(len(chapters))
 
         for index, chapter in enumerate(chapters, start=1):
-            chapter_slug = self._slugify(chapter.title, fallback=f"chapter-{self._format_number(index, padding)}")
-            chapter.slug = chapter_slug[:80] or "chapter"
-
-            final_filename = f"{self._format_number(index, padding)}-{chapter.slug}.md"
-            final_path = output_dir / final_filename
-            if final_path.exists():
-                final_path.unlink()
-
-            content_parts: list[str] = []
-            chapter_title = chapter.title.strip()
-            if chapter_title:
-                content_parts.append(f"# {chapter_title}")
-
-            for section in chapter.sections:
-                section_path = Path(section.file_path)
-                section_text = ""
-                if section_path.exists():
-                    section_text = section_path.read_text(encoding="utf-8").strip()
-                if section_text:
-                    content_parts.append(section_text)
-
-                section.filename = final_filename
-                section.file_path = str(final_path)
-
-            combined = "\n\n".join(part for part in (part.strip() for part in content_parts) if part)
-            if not combined:
-                combined = f"# {chapter.title or 'Chapter'}"
-
-            final_path.write_text(combined.rstrip() + "\n", encoding="utf-8")
-
-            chapter.output_filename = final_filename
-            chapter.output_path = str(final_path)
-
-            shutil.rmtree(chapter.working_dir, ignore_errors=True)
+            self._write_chapter_flat_file(chapter, output_dir, index, padding)
