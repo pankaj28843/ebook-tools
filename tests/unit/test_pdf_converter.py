@@ -100,7 +100,6 @@ class TestPdfConverterConfig:
         assert config.use_pdf_outlines is True
         assert config.max_section_depth == 2
         assert config.code_language is None
-        assert config.include_toc is True
         assert config.heading_style == "ATX"
 
     def test_custom_config(self):
@@ -111,7 +110,6 @@ class TestPdfConverterConfig:
             use_pdf_outlines=False,
             max_section_depth=3,
             code_language="python",
-            include_toc=False,
             heading_style="setext",
         )
         assert config.preserve_images is False
@@ -119,7 +117,6 @@ class TestPdfConverterConfig:
         assert config.use_pdf_outlines is False
         assert config.max_section_depth == 3
         assert config.code_language == "python"
-        assert config.include_toc is False
         assert config.heading_style == "setext"
 
 
@@ -132,7 +129,6 @@ class TestPdfConverter:
         converter = PdfConverter()
         assert converter.config is not None
         assert isinstance(converter.config, PdfConverterConfig)
-        assert converter._images_extracted == {}
 
     def test_init_custom_config(self):
         """Test converter initialization with custom config."""
@@ -251,22 +247,22 @@ Section 2 content.
         assert sections[1][0] == "Section 2"
 
 
-class TestPdfConverterNumbering:
-    """Covers chapter and section numbering helpers."""
+class TestPdfConverterFlattening:
+    """Covers the flattened output helpers."""
 
-    def test_apply_chapter_and_section_numbering(self, tmp_path: Path):
+    def test_flatten_sections_orders_files(self, tmp_path: Path):
         converter = PdfConverter()
         chapter_dir = tmp_path / "chapter-temp-0001"
         chapter_dir.mkdir()
         section_one = chapter_dir / "section-temp-0001.md"
-        section_one.write_text("alpha", encoding="utf-8")
         section_two = chapter_dir / "section-temp-0002.md"
+        section_one.write_text("alpha", encoding="utf-8")
         section_two.write_text("beta", encoding="utf-8")
 
         chapter = EpubChapter(
             title="Intro Chapter",
-            folder_name="chapter-temp-0001",
-            folder_path=str(chapter_dir),
+            slug="temp",
+            working_dir=str(chapter_dir),
             sections=[
                 EpubSection(
                     title="Alpha Overview",
@@ -288,20 +284,17 @@ class TestPdfConverterNumbering:
             source_file="book.pdf",
         )
 
-        converter._apply_chapter_numbering([chapter])
+        converter._flatten_sections([chapter], tmp_path)
 
-        new_dir = Path(chapter.folder_path)
-        assert new_dir.name == "intro-chapter"
-        assert chapter.sections[0].filename.startswith("1.1-alpha")
-        assert chapter.sections[1].filename.startswith("1.2-second-section")
-        assert (new_dir / chapter.sections[0].filename).exists()
-        assert (new_dir / chapter.sections[1].filename).exists()
+        generated = sorted(tmp_path.glob("*.md"))
+        assert generated[0].name.startswith("1-intro-chapter-alpha")
+        assert generated[1].name.startswith("2-intro-chapter-second-section")
+        assert not Path(chapter.working_dir).exists()
 
-    def test_apply_chapter_numbering_removes_existing_slug(self, tmp_path: Path):
+    def test_flatten_sections_replaces_existing_files(self, tmp_path: Path):
         converter = PdfConverter()
-        stale_dir = tmp_path / "intro-chapter"
-        stale_dir.mkdir()
-        (stale_dir / "old.md").write_text("old", encoding="utf-8")
+        existing = tmp_path / "1-intro-chapter-alpha.md"
+        existing.write_text("old", encoding="utf-8")
 
         chapter_dir = tmp_path / "chapter-temp-0001"
         chapter_dir.mkdir()
@@ -319,16 +312,17 @@ class TestPdfConverterNumbering:
 
         chapter = EpubChapter(
             title="Intro Chapter",
-            folder_name=chapter_dir.name,
-            folder_path=str(chapter_dir),
+            slug="temp",
+            working_dir=str(chapter_dir),
             sections=[section],
             source_file="book.pdf",
         )
 
-        converter._apply_chapter_numbering([chapter])
+        converter._flatten_sections([chapter], tmp_path)
 
-        assert Path(chapter.folder_path).name == "intro-chapter"
-        assert not (stale_dir / "old.md").exists()
+        new_file = tmp_path / "1-intro-chapter-intro.md"
+        assert new_file.exists()
+        assert new_file.read_text(encoding="utf-8") == "alpha"
 
     def test_add_code_language_hints(self):
         """Test adding language hints to code fences."""
@@ -361,9 +355,6 @@ another code block
         """Test fixing image paths in markdown."""
         converter = PdfConverter(PdfConverterConfig(preserve_images=True))
 
-        chapter_dir = Path("/tmp/chapter-01")
-        images_dir = Path("/tmp/images")
-
         content = """# Chapter
 
 Some text.
@@ -375,24 +366,21 @@ More text.
 ![Figure 2](image2.png)
 """
 
-        result = converter._fix_image_paths(content, images_dir, chapter_dir)
+    result = converter._fix_image_paths(content)
 
-        # Images should be prefixed with ../images/
-        assert "![Figure 1](../images/image1.png)" in result
-        assert "![Figure 2](../images/image2.png)" in result
+    # Images should be rewritten to the root images/ folder
+    assert "![Figure 1](images/image1.png)" in result
+    assert "![Figure 2](images/image2.png)" in result
 
     def test_fix_image_paths_preserves_absolute_paths(self):
         """Test that absolute paths are not modified."""
         converter = PdfConverter(PdfConverterConfig(preserve_images=True))
 
-        chapter_dir = Path("/tmp/chapter-01")
-        images_dir = Path("/tmp/images")
-
         content = """![Absolute](/absolute/path/image.png)
 ![Relative already](../images/existing.png)
 """
 
-        result = converter._fix_image_paths(content, images_dir, chapter_dir)
+        result = converter._fix_image_paths(content)
 
         # Should not modify absolute or already-relative paths
         assert "![Absolute](/absolute/path/image.png)" in result
@@ -402,11 +390,8 @@ More text.
         """Test that image path fixing is skipped when disabled."""
         converter = PdfConverter(PdfConverterConfig(preserve_images=False))
 
-        chapter_dir = Path("/tmp/chapter-01")
-        images_dir = Path("/tmp/images")
-
         content = "![Figure](image.png)"
-        result = converter._fix_image_paths(content, images_dir, chapter_dir)
+        result = converter._fix_image_paths(content)
 
         # Should not modify when preserve_images is False
         assert result == content
@@ -525,7 +510,6 @@ class TestPdfConverterAsync:
             section_content="",
             section_index=1,
             chapter_dir=Path("/tmp/chapter"),
-            images_dir=Path("/tmp/images"),
         )
 
         assert result is None
@@ -539,7 +523,6 @@ class TestPdfConverterAsync:
             section_content="   \n\n   ",
             section_index=1,
             chapter_dir=Path("/tmp/chapter"),
-            images_dir=Path("/tmp/images"),
         )
 
         assert result is None
@@ -615,8 +598,8 @@ class TestPdfConverterAsync:
         assert removed_paths, "Empty chapter folders should be cleaned up"
 
     @pytest.mark.asyncio
-    async def test_convert_pdf_to_markdown_builds_toc(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-        """End-to-end conversion should produce chapters, sections, and toc artifacts."""
+    async def test_convert_pdf_to_markdown_flattens_sections(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """End-to-end conversion should produce flattened markdown files."""
         pdf_path = tmp_path / "book.pdf"
         pdf_path.write_text("fake-pdf", encoding="utf-8")
         output_dir = tmp_path / "output"
@@ -668,15 +651,18 @@ class TestPdfConverterAsync:
         assert result.book_title == "PDF Title"
         assert result.chapters_count == 2
         assert result.sections_count == 4
-        assert (output_dir / "README.md").exists()
-        assert result.table_of_contents_path and Path(result.table_of_contents_path).exists()
-        assert result.toc_json_path and Path(result.toc_json_path).exists()
+        assert result.table_of_contents_path is None
+        assert result.toc_json_path is None
+
+        flattened = sorted(f.name for f in output_dir.glob("*.md"))
+        assert flattened[:2] == ["1-chapter-one-section-alpha.md", "2-chapter-one-section-beta.md"]
+        assert flattened[2:] == ["3-chapter-two-section-alpha.md", "4-chapter-two-section-beta.md"]
 
         first_chapter = result.chapters[0]
-        assert first_chapter.folder_name == "chapter-one"
-        assert Path(first_chapter.folder_path).exists()
+        assert first_chapter.slug == "chapter-one"
+        assert not Path(first_chapter.working_dir).exists()
         first_section = first_chapter.sections[0]
-        assert first_section.filename.startswith("1.")
+        assert first_section.filename == "1-chapter-one-section-alpha.md"
         assert Path(first_section.file_path).exists()
 
     @pytest.mark.asyncio

@@ -155,47 +155,56 @@ def test_fix_image_paths_and_extract_images(tmp_path):
     assert conv._images_extracted.get("images/pic.png") == "images/pic.png"
 
 
-def test_apply_chapter_and_section_numbering(tmp_path):
-    # prepare chapter dir and a section file
+def test_flatten_sections_assigns_numbered_filenames(tmp_path):
     chapter_dir = tmp_path / "chapter-temp-0001"
     chapter_dir.mkdir()
-    section_file = chapter_dir / "section-temp-0001.md"
-    section_file.write_text("hello world")
+    first_file = chapter_dir / "section-temp-0001.md"
+    second_file = chapter_dir / "section-temp-0002.md"
+    first_file.write_text("first", encoding="utf-8")
+    second_file.write_text("second", encoding="utf-8")
 
-    section = EpubSection(
-        title="First Section",
-        filename="section-temp-0001.md",
-        file_path=str(section_file),
-        word_count=2,
-        character_count=11,
-        slug_hint="first-section",
-        source_fragment=None,
-    )
+    sections = [
+        EpubSection(
+            title="First Section",
+            filename=first_file.name,
+            file_path=str(first_file),
+            word_count=1,
+            character_count=5,
+            slug_hint="first-section",
+            source_fragment=None,
+        ),
+        EpubSection(
+            title="Second Section",
+            filename=second_file.name,
+            file_path=str(second_file),
+            word_count=1,
+            character_count=6,
+            slug_hint="second-section",
+            source_fragment=None,
+        ),
+    ]
 
     chapter = EpubChapter(
         title="My Chapter",
-        folder_name=chapter_dir.name,
-        folder_path=str(chapter_dir),
-        sections=[section],
+        slug="temp",
+        working_dir=str(chapter_dir),
+        sections=sections,
         source_file="OEBPS/ch1.xhtml",
     )
 
     conv = EpubConverter()
-    conv._apply_chapter_numbering([chapter])
+    conv._flatten_sections([chapter], tmp_path)
 
-    # After numbering, folder should be renamed and section files renamed accordingly
-    new_folder = tmp_path / "my-chapter"
-    assert new_folder.exists()
-    # Section should have been renamed to include prefix
-    files = list(new_folder.iterdir())
-    assert any("1.1-" in f.name for f in files)
+    generated = sorted(tmp_path.glob("*.md"))
+    assert len(generated) == 2
+    assert generated[0].name.startswith("1-my-chapter-first-section")
+    assert generated[1].name.startswith("2-my-chapter-second-section")
 
 
-def test_apply_chapter_numbering_removes_existing_slug(tmp_path):
+def test_flatten_sections_overwrites_existing_conflicts(tmp_path):
     conv = EpubConverter()
-    stale_dir = tmp_path / "getting-started"
-    stale_dir.mkdir()
-    (stale_dir / "old.md").write_text("old", encoding="utf-8")
+    existing = tmp_path / "1-getting-started-introduction.md"
+    existing.write_text("old", encoding="utf-8")
 
     chapter_dir = tmp_path / "chapter-temp-0001"
     chapter_dir.mkdir()
@@ -214,13 +223,14 @@ def test_apply_chapter_numbering_removes_existing_slug(tmp_path):
 
     chapter = EpubChapter(
         title="Getting Started",
-        folder_name=chapter_dir.name,
-        folder_path=str(chapter_dir),
+        slug="temp",
+        working_dir=str(chapter_dir),
         sections=[section],
         source_file="ch01.xhtml",
     )
 
-    conv._apply_chapter_numbering([chapter])
+    conv._flatten_sections([chapter], tmp_path)
 
-    assert Path(chapter.folder_path).name == "getting-started"
-    assert not (stale_dir / "old.md").exists()
+    new_file = tmp_path / "1-getting-started-introduction.md"
+    assert new_file.exists()
+    assert new_file.read_text(encoding="utf-8") == "intro"

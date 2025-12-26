@@ -15,11 +15,11 @@ def make_section(title, filename="s.md", file_path="/tmp/s.md", slug_hint="s"):
     )
 
 
-def make_chapter(title, folder_name="chap", folder_path="/tmp/chap", sections=None, source_file="chap.xhtml"):
+def make_chapter(title, working_dir="/tmp/chapter", sections=None, source_file="chap.xhtml"):
     return EpubChapter(
         title=title,
-        folder_name=folder_name,
-        folder_path=folder_path,
+        slug="temp",
+        working_dir=working_dir,
         sections=sections or [make_section("Intro")],
         source_file=source_file,
     )
@@ -38,42 +38,28 @@ def test_clean_filename_and_slugify_roundtrip():
     assert conv._slugify("  My Title  ", fallback="x") != ""
 
 
-def test_build_linear_json_entries_basic(tmp_path):
+def test_apply_nav_titles_prefers_href_matches():
     conv = EpubConverter()
-    c1 = make_chapter("Chapter One", folder_name="ch1", folder_path=str(tmp_path / "ch1"))
-    c2 = make_chapter("Chapter Two", folder_name="ch2", folder_path=str(tmp_path / "ch2"))
-    chapters = [c1, c2]
+    chapter = make_chapter("Placeholder", working_dir="/tmp/chapter", source_file="chapter1.xhtml")
 
-    entries = conv._build_json_entries(chapters, nav_entries=None)
-    # Expect chapter entries + section entries
-    assert any(e.get("type") == "chapter" for e in entries)
-    assert any(e.get("type") == "section" for e in entries)
-    # chapter count equals created chapters
-    assert sum(1 for e in entries if e.get("type") == "chapter") == 2
-
-
-def test_nav_aligned_toc_builder_matches_by_title_and_fragment(tmp_path):
-    conv = EpubConverter()
-
-    # Create chapters/sections with explicit fragments and titles
-    sec1 = make_section("Getting Started", filename="s1.md", file_path=str(tmp_path / "s1.md"), slug_hint="start")
-    sec1.source_fragment = "intro"
-    ch = EpubChapter(
-        title="Intro Chapter",
-        folder_name="chint",
-        folder_path=str(tmp_path / "chint"),
-        sections=[sec1],
-        source_file="chapter1.xhtml",
-    )
-
-    # Create nav entries that reference the fragment and the title
     nav_entries = [
-        toc_checker.TocEntry(title="Intro Chapter", href="chapter1.xhtml", level=1, source="navmap"),
-        toc_checker.TocEntry(title="Getting Started", href="chapter1.xhtml#intro", level=2, source="navmap"),
+        toc_checker.TocEntry(title="Nav Chapter", href="chapter1.xhtml", level=1, source="nav"),
+        toc_checker.TocEntry(title="Sibling", href="other.xhtml", level=1, source="nav"),
     ]
 
-    json_entries = conv._build_json_entries([ch], nav_entries=nav_entries)
-    # Ensure the nav-driven entries include our chapter and section
-    titles = [e.get("title") for e in json_entries]
-    assert "Intro Chapter" in titles
-    assert "Getting Started" in titles
+    conv._apply_nav_titles([chapter], nav_entries)
+
+    assert chapter.title == "Nav Chapter"
+
+
+def test_apply_nav_titles_normalizes_titles_when_no_href_match():
+    conv = EpubConverter()
+    chapter = make_chapter("Intro chapter", working_dir="/tmp/chapter", source_file="missing.xhtml")
+
+    nav_entries = [
+        toc_checker.TocEntry(title="Intro Chapter", href=None, level=1, source="nav"),
+    ]
+
+    conv._apply_nav_titles([chapter], nav_entries)
+
+    assert chapter.title == "Intro Chapter"

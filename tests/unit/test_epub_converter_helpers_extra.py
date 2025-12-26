@@ -1,4 +1,4 @@
-import json
+from pathlib import Path
 
 from ebook_tools.epub_converter import EpubConverter
 from ebook_tools.epub_models import EpubChapter, EpubSection
@@ -17,13 +17,13 @@ def make_section(title, filename="section-temp-0001.md", file_path=None, slug_hi
     )
 
 
-def make_chapter(title, folder_name, folder_path, sections):
+def make_chapter(title, working_dir, sections):
     return EpubChapter(
         title=title,
-        folder_name=folder_name,
-        folder_path=str(folder_path),
+        slug="temp",
+        working_dir=str(working_dir),
         sections=sections,
-        source_file=f"{folder_name}.xhtml",
+        source_file=f"{title}.xhtml",
     )
 
 
@@ -56,30 +56,21 @@ def test_determine_padding_and_format_number():
     assert conv._format_number(12, 3) == "012"
 
 
-def test_apply_chapter_and_section_numbering_and_generate_toc(tmp_path):
+def test_flatten_sections_moves_files_and_cleans_temp(tmp_path):
     conv = EpubConverter()
 
-    # create temp chapter dir and a section file
-    chap_dir = tmp_path / "chapter-temp-0001"
-    chap_dir.mkdir()
-    sect_path = chap_dir / "section-temp-0001.md"
-    sect_path.write_text("# Hello\n\nContent")
+    chapter_dir = tmp_path / "chapter-temp-0001"
+    chapter_dir.mkdir()
+    section_path = chapter_dir / "section-temp-0001.md"
+    section_path.write_text("# Intro\n", encoding="utf-8")
 
-    section = make_section("A Section", filename="section-temp-0001.md", file_path=sect_path, slug_hint="A Section")
-    chapter = make_chapter("My Chapter", folder_name="chapter-temp-0001", folder_path=chap_dir, sections=[section])
+    section = make_section("A Section", filename="section-temp-0001.md", file_path=section_path, slug_hint="A Section")
+    chapter = make_chapter("My Chapter", working_dir=chapter_dir, sections=[section])
 
-    # Apply numbering (will rename files/folders)
-    conv._apply_chapter_numbering([chapter])
+    conv._flatten_sections([chapter], tmp_path)
 
-    # After numbering, chapter folder_name should use the chapter title slug
-    assert chapter.folder_name == "my-chapter"
-    assert chapter.sections[0].filename.startswith("1.")
-
-    # generate toc files
-    toc_path, json_path = conv._generate_toc([chapter], tmp_path, "Book Title", nav_entries=None)
-    assert toc_path.exists()
-    assert json_path.exists()
-
-    payload = json.loads(json_path.read_text(encoding="utf-8"))
-    assert payload.get("book_title") == "Book Title"
-    assert payload.get("chapters") == 1
+    assert not chapter_dir.exists()
+    flattened = Path(chapter.sections[0].file_path)
+    assert flattened.parent == tmp_path
+    assert flattened.name.startswith("1-my-chapter-a-section")
+    assert chapter.slug == "my-chapter"

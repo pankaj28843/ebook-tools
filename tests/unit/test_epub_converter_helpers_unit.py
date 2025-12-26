@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from bs4 import BeautifulSoup
@@ -31,7 +30,7 @@ class TestEpubConverterHelpers:
         assert slug == "section"
         assert converter._slugify(None, fallback="missing") == "missing"
 
-    def test_apply_chapter_numbering_updates_directories(self, converter: EpubConverter, tmp_path: Path) -> None:
+    def test_flatten_sections_moves_files_to_output(self, converter: EpubConverter, tmp_path: Path) -> None:
         chapter_dir = tmp_path / "chapter-temp-0001"
         chapter_dir.mkdir()
         section_path = chapter_dir / "section-temp-0001.md"
@@ -47,8 +46,8 @@ class TestEpubConverterHelpers:
         )
         chapter = EpubChapter(
             title="Getting Started",
-            folder_name=chapter_dir.name,
-            folder_path=str(chapter_dir),
+            slug="temp",
+            working_dir=str(chapter_dir),
             sections=[section],
             source_file="ch01.xhtml",
         )
@@ -68,25 +67,22 @@ class TestEpubConverterHelpers:
         )
         chapter2 = EpubChapter(
             title="Advanced",
-            folder_name=chapter2_dir.name,
-            folder_path=str(chapter2_dir),
+            slug="temp",
+            working_dir=str(chapter2_dir),
             sections=[section2],
             source_file="ch02.xhtml",
         )
 
-        converter._apply_chapter_numbering([chapter, chapter2])
-
-        first_dir = Path(chapter.folder_path)
-        second_dir = Path(chapter2.folder_path)
-        assert first_dir.name == "getting-started"
-        assert second_dir.name == "advanced"
+        converter._flatten_sections([chapter, chapter2], tmp_path)
 
         first_section_path = Path(chapter.sections[0].file_path)
         second_section_path = Path(chapter2.sections[0].file_path)
-        assert first_section_path.exists()
-        assert first_section_path.name.startswith("1.1-introduction")
-        assert second_section_path.exists()
-        assert second_section_path.name.startswith("2.1-section")
+        assert first_section_path.parent == tmp_path
+        assert second_section_path.parent == tmp_path
+        assert first_section_path.name.startswith("1-getting-started-introduction")
+        assert second_section_path.name.startswith("2-advanced-section")
+        assert not Path(chapter.working_dir).exists()
+        assert not Path(chapter2.working_dir).exists()
 
     def test_determine_padding_and_format_number(self, converter: EpubConverter) -> None:
         assert converter._determine_padding(9) == 1
@@ -179,85 +175,6 @@ class TestEpubConverterHelpers:
         section = sections[0]
         assert section.title == "Chapter Intro"
         assert Path(section.file_path).exists()
-
-
-@pytest.mark.unit
-class TestEpubConverterTocGeneration:
-    """Validates table-of-contents helpers and nav alignment."""
-
-    def test_generate_toc_writes_markdown_and_json(self, converter: EpubConverter, tmp_path: Path) -> None:
-        chapters = [
-            EpubChapter(
-                title="Chapter One",
-                folder_name="chapter-one",
-                folder_path=str(tmp_path / "chapter-one"),
-                sections=[
-                    EpubSection(
-                        title="Intro",
-                        filename="1.1-intro.md",
-                        file_path=str(tmp_path / "chapter-one" / "1.1-intro.md"),
-                        word_count=100,
-                        character_count=500,
-                        slug_hint="intro",
-                        source_fragment="intro",
-                    )
-                ],
-                source_file="ch01.xhtml",
-            ),
-            EpubChapter(
-                title="Chapter Two",
-                folder_name="chapter-two",
-                folder_path=str(tmp_path / "chapter-two"),
-                sections=[],
-                source_file="ch02.xhtml",
-            ),
-        ]
-
-        toc_path, json_path = converter._generate_toc(
-            chapters=chapters,
-            output_dir=tmp_path,
-            book_title="Sample Book",
-            nav_entries=None,
-        )
-
-        rendered = toc_path.read_text(encoding="utf-8")
-        assert "# Sample Book" in rendered
-        assert "- **Chapters:** 2" in rendered
-
-        parsed = json.loads(json_path.read_text(encoding="utf-8"))
-        assert parsed["book_title"] == "Sample Book"
-        assert parsed["chapters"] == 2
-        assert parsed["entries"][0]["href"].startswith("chapter-one")
-
-    def test_build_json_entries_aligns_nav_entries(self, converter: EpubConverter) -> None:
-        chapter = EpubChapter(
-            title="Guide",
-            folder_name="guide",
-            folder_path="/tmp/guide",
-            sections=[
-                EpubSection(
-                    title="Deep Dive",
-                    filename="1.1-deep-dive.md",
-                    file_path="/tmp/guide/1.1-deep-dive.md",
-                    word_count=120,
-                    character_count=600,
-                    slug_hint="deep-dive",
-                    source_fragment="deep-dive",
-                )
-            ],
-            source_file="guide.xhtml",
-        )
-        nav_entries = [
-            TocEntry(title="Guide", href="guide.xhtml", level=1, source="navmap"),
-            TocEntry(title="Deep Dive", href="guide.xhtml#deep-dive", level=2, source="navmap"),
-        ]
-
-        entries = converter._build_json_entries([chapter], nav_entries)
-
-        assert entries[0]["href"] == "guide/"
-        assert entries[1]["href"] == "guide/1.1-deep-dive.md"
-        assert entries[0]["title"] == "Guide"
-        assert entries[1]["title"] == "Deep Dive"
 
 
 @pytest.mark.unit
@@ -362,50 +279,3 @@ class TestEpubConverterNavParsing:
         )
 
         assert converter._load_nav_entries(FakeBook()) == []
-
-
-class TestEpubConverterNavigationAlignment:
-    def test_build_json_entries_derives_missing_entries(self, converter: EpubConverter) -> None:
-        section = EpubSection(
-            title="Intro",
-            filename="1.1-intro.md",
-            file_path="/tmp/1.1-intro.md",
-            word_count=10,
-            character_count=40,
-            slug_hint="intro",
-            source_fragment="intro",
-        )
-        chapter_one = EpubChapter(
-            title="Guide",
-            folder_name="1-guide",
-            folder_path="/tmp/1-guide",
-            sections=[section],
-            source_file="guide.xhtml",
-        )
-        chapter_two = EpubChapter(
-            title="Advanced",
-            folder_name="2-advanced",
-            folder_path="/tmp/2-advanced",
-            sections=[
-                EpubSection(
-                    title="Deep Dive",
-                    filename="2.1-deep-dive.md",
-                    file_path="/tmp/2-advanced/2.1-deep-dive.md",
-                    word_count=15,
-                    character_count=80,
-                    slug_hint="deep-dive",
-                    source_fragment="deep-dive",
-                )
-            ],
-            source_file="advanced.xhtml",
-        )
-
-        nav_entries = [
-            TocEntry(title="Guide", href="guide.xhtml", level=1, source="navmap"),
-        ]
-
-        entries = converter._build_json_entries([chapter_one, chapter_two], nav_entries)
-
-        derived = [entry for entry in entries if entry.get("derived_only")]
-        assert any(e["href"].endswith("2-advanced/") for e in derived)
-        assert any(e.get("derived_only") for e in derived)

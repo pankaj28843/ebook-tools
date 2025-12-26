@@ -83,29 +83,145 @@ class EpubConverterConfig(BaseModel):
     preserve_images: bool = Field(default=True, description="Extract and preserve images from EPUB")
     max_section_depth: int = Field(default=6, description="Maximum heading depth to consider for sections")
     clean_filenames: bool = Field(default=True, description="Clean filenames to be filesystem-safe")
-            soup,
-            chapter_title_tag,
-            section_headings[0],
-            chapter_dir,
-            temp_index,
-        )
-        if intro_section:
-            sections.append(intro_section)
-            temp_index += 1
 
-        for i, section_heading in enumerate(section_headings):
-            next_heading = section_headings[i + 1] if i + 1 < len(section_headings) else None
-            section = await self._process_section(
-                section_heading,
-                next_heading,
+
+class EpubConverter:
+    """Convert EPUB documents into flattened Markdown outputs."""
+
+    def __init__(self, config: EpubConverterConfig | None = None) -> None:
+        self.config = config or EpubConverterConfig()
+        self._images_extracted: dict[str, str] = {}
+
+    async def convert_epub_to_markdown(
+        self,
+        epub_path: str | Path,
+        output_dir: str | Path,
+        book_title: str | None = None,
+    ) -> ConversionResult:
+        epub_path = Path(epub_path)
+        output_dir = Path(output_dir)
+
+        if not epub_path.exists():
+            raise FileNotFoundError(f"EPUB file not found: {epub_path}")
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        normalized_path, temp_epub = self._prepare_epub_for_conversion(epub_path)
+        self._images_extracted = {}
+
+        try:
+            book = epub.read_epub(str(normalized_path))
+            book_title = book_title or self._extract_book_title(book)
+            nav_entries = self._load_nav_entries(book)
+
+            if self.config.preserve_images:
+                self._extract_images(book, output_dir)
+
+            from ebooklib import ITEM_DOCUMENT
+
+            chapters: list[EpubChapter] = []
+            temp_chapter_index = 1
+            for item in book.get_items_of_type(ITEM_DOCUMENT):
+                chapter = await self._process_chapter(item, output_dir, temp_chapter_index)
+                temp_chapter_index += 1
+                if chapter.sections:
+                    chapters.append(chapter)
+
+            self._apply_nav_titles(chapters, nav_entries)
+            self._flatten_sections(chapters, output_dir)
+
+            sections_count = sum(len(chapter.sections) for chapter in chapters)
+
+            return ConversionResult(
+                book_title=book_title,
+                chapters_count=len(chapters),
+                sections_count=sections_count,
+                output_directory=str(output_dir),
+                chapters=chapters,
+                table_of_contents_path=None,
+                toc_json_path=None,
+            )
+        finally:
+            if temp_epub and temp_epub.exists():
+                temp_epub.unlink()
+
+    async def _process_chapter(self, chapter_item: Any, output_dir: Path, temp_index: int) -> EpubChapter:
+        chapter_dir = output_dir / f"chapter-temp-{temp_index:04d}"
+        chapter_dir.mkdir(parents=True, exist_ok=True)
+
+        raw_content = chapter_item.get_content()
+        if isinstance(raw_content, bytes):
+            html_content = raw_content.decode("utf-8", errors="ignore")
+        else:
+            html_content = str(raw_content)
+
+        soup = BeautifulSoup(html_content, "html.parser")
+        if self.config.strip_unwanted_tags:
+            self._strip_unwanted_tags(soup)
+
+        chapter_title, chapter_title_tag = self._extract_chapter_title(soup)
+        sections = await self._collect_sections(soup, chapter_title, chapter_title_tag, chapter_dir)
+
+        return EpubChapter(
+            title=chapter_title,
+            slug=self._slugify(chapter_title, fallback="chapter"),
+            working_dir=str(chapter_dir),
+            sections=sections,
+            source_file=getattr(chapter_item, "get_name", lambda: "")(),
+        )
+
+    async def _collect_sections(
+        self,
+        soup: BeautifulSoup,
+        chapter_title: str,
+        chapter_title_tag: Tag | None,
+        chapter_dir: Path,
+    ) -> list[EpubSection]:
+        headings = self._section_heading_names()
+        section_headings = soup.find_all(headings)
+        valid_headings = [tag for tag in section_headings if isinstance(tag, Tag)]
+
+        sections: list[EpubSection] = []
+        temp_index = 1
+
+        if not valid_headings:
+            fallback = await self._create_section_from_content(
+                soup,
+                chapter_title,
+                chapter_title,
                 chapter_dir,
                 temp_index,
             )
+            return [fallback] if fallback else []
+
+        intro = await self._process_introduction(
+            soup,
+            chapter_title_tag,
+            valid_headings[0],
+            chapter_dir,
+            temp_index,
+        )
+        if intro:
+            sections.append(intro)
+            temp_index += 1
+
+        for index, heading in enumerate(valid_headings):
+            next_heading = valid_headings[index + 1] if index + 1 < len(valid_headings) else None
+            section = await self._process_section(heading, next_heading, chapter_dir, temp_index)
             if section:
                 sections.append(section)
                 temp_index += 1
 
         return sections
+
+    def _section_heading_names(self) -> list[str]:
+        max_depth = max(2, min(self.config.max_section_depth, 6))
+        return [f"h{level}" for level in range(2, max_depth + 1)]
+
+    def _strip_unwanted_tags(self, soup: BeautifulSoup) -> None:
+        for tag_name in ("script", "style", "noscript"):
+            for tag in soup.find_all(tag_name):
+                tag.decompose()
 
     async def _process_introduction(
         self,
@@ -115,7 +231,6 @@ class EpubConverterConfig(BaseModel):
         chapter_dir: Path,
         temp_index: int,
     ) -> EpubSection | None:
-        """Process introductory content before the first section."""
         intro_parts = self._collect_intro_parts(
             self._intro_candidates(soup, chapter_title_tag),
             first_section,
@@ -136,7 +251,6 @@ class EpubConverterConfig(BaseModel):
         )
 
     def _intro_candidates(self, soup: BeautifulSoup, chapter_title_tag: Tag | None):
-        """Yield nodes that may form the introduction block."""
         if chapter_title_tag:
             return chapter_title_tag.next_siblings
         if soup.body:
@@ -144,7 +258,6 @@ class EpubConverterConfig(BaseModel):
         return soup.children
 
     def _collect_intro_parts(self, candidates, first_section: Tag):
-        """Collect nodes preceding the first section heading."""
         parts = []
         for element in candidates:
             if element == first_section:
@@ -160,23 +273,18 @@ class EpubConverterConfig(BaseModel):
         chapter_dir: Path,
         temp_index: int,
     ) -> EpubSection | None:
-        """Process a single section defined by h2 headings."""
         section_title = section_heading.get_text().strip()
-        section_parts = [section_heading]  # Include the heading itself
-
-        # Collect all content until the next heading or end
+        section_parts = [section_heading]
         current = section_heading.next_sibling
         while current:
             if current == next_heading:
                 break
             if hasattr(current, "name"):
-                # Stop if we encounter another h1 or h2 (shouldn't happen with next_heading logic)
                 if current.name and current.name.lower() in ["h1", "h2"]:  # type: ignore[union-attr]
                     break
                 section_parts.append(current)  # type: ignore[arg-type]
             current = current.next_sibling
 
-        # Convert to HTML and then to Markdown
         section_html = "".join(str(part) for part in section_parts)
         return await self._create_section_from_html(
             section_html,
@@ -188,18 +296,14 @@ class EpubConverterConfig(BaseModel):
         )
 
     def _extract_fragment_id(self, element: Tag | None) -> str | None:
-        """Return the normalized fragment identifier for a heading element."""
-
         if element is None:
             return None
         fragment = element.get("id") or element.get("name")
-        if isinstance(fragment, list):  # Defensive: BeautifulSoup can return lists for dup attributes
+        if isinstance(fragment, list):
             fragment = fragment[0] if fragment else None
         return self._normalize_fragment(fragment)
 
     def _normalize_fragment(self, fragment: str | None) -> str | None:
-        """Normalize raw fragment identifiers by stripping prefixes and whitespace."""
-
         return _normalize_fragment_value(fragment)
 
     async def _create_section_from_html(
@@ -212,27 +316,22 @@ class EpubConverterConfig(BaseModel):
         *,
         source_fragment: str | None = None,
     ) -> EpubSection | None:
-        """Create a section from HTML content."""
         if not html_content.strip():
             return None
 
-        # Fix image paths if we extracted images
         html_content = self._fix_image_paths(html_content)
 
-        # Convert to Markdown
         markdown_content = markdownify.markdownify(
             html_content,
             heading_style=self.config.heading_style,
-            code_language=self.config.code_language or "",  # markdownify requires str, not None
+            code_language=self.config.code_language or "",
         )
 
         if not markdown_content.strip():
             return None
 
-        # Save to file using temporary numbered prefix
         md_filename = f"section-temp-{temp_index:04d}.md"
         md_path = chapter_dir / md_filename
-
         md_path.write_text(markdown_content, encoding="utf-8")
 
         return EpubSection(
@@ -253,13 +352,10 @@ class EpubConverterConfig(BaseModel):
         chapter_dir: Path,
         temp_index: int,
     ) -> EpubSection | None:
-        """Create a section from BeautifulSoup content."""
-        # Remove the chapter title tag to avoid duplication
         chapter_title_tag = soup.find(["h1", "h2", "h3"])
         if chapter_title_tag:
             chapter_title_tag.decompose()
 
-        # Get remaining content
         content = soup.get_text().strip() if soup.body else ""
         if not content:
             return None
@@ -275,8 +371,6 @@ class EpubConverterConfig(BaseModel):
         )
 
     def _extract_chapter_title(self, soup: BeautifulSoup) -> tuple[str, Tag | None]:
-        """Extract chapter title from soup content."""
-        # Look for h1 first, then h2, then h3
         for tag_name in ["h1", "h2", "h3"]:
             tag = soup.find(tag_name)
             if tag:
@@ -284,24 +378,19 @@ class EpubConverterConfig(BaseModel):
                 if title:
                     return title, tag
 
-        # Fallback: use title tag or first heading
         title_tag = soup.find("title")
         if title_tag:
             return title_tag.get_text().strip(), None
 
-        # Last resort: generic name
         return "Chapter", None
 
     def _extract_book_title(self, book: epub.EpubBook) -> str:
-        """Extract book title from EPUB metadata."""
         title = book.get_metadata("DC", "title")
         if title and title[0]:
             return title[0][0]
         return "Unknown Book"
 
     def _load_nav_entries(self, book: epub.EpubBook) -> list[toc_checker.TocEntry]:
-        """Extract navigation table entries from the EPUB if available."""
-
         nav_source: Any | None = None
         nav_accessor = getattr(book, "get_toc", None)
         if callable(nav_accessor):
@@ -322,7 +411,6 @@ class EpubConverterConfig(BaseModel):
             return []
 
     def _clean_filename(self, filename: str) -> str:
-        """Clean filename to be filesystem-safe."""
         cleaned = re.sub(r'[<>:"/\\|?*]', "", filename)
         cleaned = re.sub(r"[^\w\s\-._()]", "", cleaned)
         cleaned = re.sub(r"\s+", "-", cleaned.strip())
@@ -331,20 +419,17 @@ class EpubConverterConfig(BaseModel):
         return cleaned or ""
 
     def _slugify(self, text: str | None, fallback: str) -> str:
-        """Generate a deterministic slug, falling back when empty."""
         if not text:
             return fallback
         slug = self._clean_filename(text)
         return slug or fallback
 
     def _determine_padding(self, count: int) -> int:
-        """Return number of digits to pad based on total count."""
         if count < 10:
             return 1
         return len(str(count))
 
     def _format_number(self, value: int, width: int) -> str:
-        """Format numeric index with conditional zero padding."""
         return str(value).zfill(width) if width > 1 else str(value)
 
     def _apply_nav_titles(
@@ -352,8 +437,6 @@ class EpubConverterConfig(BaseModel):
         chapters: list[EpubChapter],
         nav_entries: Sequence[toc_checker.TocEntry] | None,
     ) -> None:
-        """Use navMap entries to enrich chapter titles when possible."""
-
         if not nav_entries or not chapters:
             return
 
@@ -400,8 +483,6 @@ class EpubConverterConfig(BaseModel):
             claimed_ids.add(id(matched_chapter))
 
     def _flatten_sections(self, chapters: list[EpubChapter], output_dir: Path) -> None:
-        """Move every section into the root output dir using global numbering."""
-
         total_sections = sum(len(chapter.sections) for chapter in chapters)
         if total_sections == 0:
             for chapter in chapters:
@@ -440,7 +521,6 @@ class EpubConverterConfig(BaseModel):
             shutil.rmtree(chapter.working_dir, ignore_errors=True)
 
     def _prepare_epub_for_conversion(self, epub_path: Path) -> tuple[Path, Path | None]:
-        """Ensure EPUB has all manifest files available; return normalized path."""
         with ZipFile(epub_path) as z:
             names = z.namelist()
             names_set, lower_map, ascii_map = self._build_name_maps(names)
@@ -599,14 +679,12 @@ class EpubConverterConfig(BaseModel):
         return "/".join(safe_segments)
 
     def _fix_image_paths(self, html_content: str) -> str:
-        """Fix image paths in HTML content to point to extracted images."""
         if not self._images_extracted:
             return html_content
 
         soup = BeautifulSoup(html_content, "html.parser")
         for img in soup.find_all("img"):
             src = img.get("src")
-            # BeautifulSoup can return list for attributes; ensure it's a string
             if isinstance(src, list):
                 src = src[0] if src else None
             if src and isinstance(src, str) and src in self._images_extracted:
@@ -615,24 +693,17 @@ class EpubConverterConfig(BaseModel):
         return str(soup)
 
     def _extract_images(self, book: epub.EpubBook, output_dir: Path) -> None:
-        """Extract images from EPUB to images directory."""
         from ebooklib import ITEM_IMAGE
 
         images_dir = output_dir / "images"
         images_dir.mkdir(exist_ok=True)
 
         for item in book.get_items_of_type(ITEM_IMAGE):
-            # Get image content
             image_content = item.get_content()
-
-            # Determine filename
             original_name = item.get_name()
             filename = Path(original_name).name
 
-            # Save image
             image_path = images_dir / filename
             image_path.write_bytes(image_content)
 
-            # Map original path to new relative path
             self._images_extracted[original_name] = f"images/{filename}"
-

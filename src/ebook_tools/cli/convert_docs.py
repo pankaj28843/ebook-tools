@@ -5,10 +5,8 @@
     that can be served via filesystem tenants managed in deployment.json.
 
 Features:
-- Converts EPUB/MOBI/PDF to organized Markdown directory
-- Each chapter becomes a folder with section files
-- Generates table of contents (README.md)
-- Preserves images and code blocks
+- Converts EPUB/PDF into a single-level Markdown directory with numbered files
+- Preserves the original reading order plus shared `images/` assets
 - Updates deployment.json automatically (or provides a snippet when skipped)
 - Non-interactive operation suitable for automation
 
@@ -465,47 +463,29 @@ def print_conversion_summary(result: ConversionResult):
     print(f"  Chapters:      {result.chapters_count}")
     print(f"  Sections:      {result.sections_count}")
     print(f"  Output Dir:    {result.output_directory}")
+    print("\n📁 Generated Files:\n")
 
-    if result.table_of_contents_path:
-        print(f"  TOC README:    {result.table_of_contents_path}")
-    if result.toc_json_path:
-        print(f"  TOC JSON:      {result.toc_json_path}")
-
-    print("\n📁 Generated Structure:\n")
-
-    # Show directory tree (first 3 chapters)
     output_path = Path(result.output_directory)
-    chapters_to_show = min(3, len(result.chapters))
+    images_dir = output_path / "images"
+
+    all_files = [Path(section.file_path).name for chapter in result.chapters for section in chapter.sections]
+    all_files.sort()
+    preview_files = all_files[:5]
+    remaining = max(len(all_files) - len(preview_files), 0)
+
+    entries: list[str] = []
+    if images_dir.exists():
+        entries.append("images/")
+    entries.extend(preview_files)
+    if remaining:
+        entries.append(f"... ({remaining} more files)")
+    if not entries:
+        entries.append("(no markdown files emitted)")
 
     print(f"  {output_path.name}/")
-    toc_artifacts = []
-    if result.table_of_contents_path:
-        toc_artifacts.append("README.md (table of contents)")
-    if result.toc_json_path:
-        toc_artifacts.append("toc.json (machine-readable TOC)")
-
-    for idx, artifact in enumerate(toc_artifacts):
-        is_last_artifact = idx == len(toc_artifacts) - 1 and chapters_to_show == 0
-        prefix = "└──" if is_last_artifact else "├──"
-        print(f"  {prefix} {artifact}")
-
-    for i, chapter in enumerate(result.chapters[:chapters_to_show]):
-        is_last = i == len(result.chapters) - 1 and len(result.chapters) <= chapters_to_show
-        prefix = "└──" if is_last else "├──"
-
-        print(f"  {prefix} {chapter.folder_name}/")
-
-        sections_to_show = min(3, len(chapter.sections))
-        for j, section in enumerate(chapter.sections[:sections_to_show]):
-            is_last_section = j == len(chapter.sections) - 1 and len(chapter.sections) <= sections_to_show
-            section_prefix = "    └──" if is_last_section else "    ├──"
-            print(f"  {section_prefix} {section.filename}")
-
-        if len(chapter.sections) > sections_to_show:
-            print(f"      └── ... ({len(chapter.sections) - sections_to_show} more sections)")
-
-    if len(result.chapters) > chapters_to_show:
-        print(f"  └── ... ({len(result.chapters) - chapters_to_show} more chapters)")
+    for idx, entry in enumerate(entries):
+        connector = "└──" if idx == len(entries) - 1 else "├──"
+        print(f"  {connector} {entry}")
 
     print()
 
@@ -592,7 +572,6 @@ async def main_async(args):  # noqa: PLR0911 - CLI function with multiple exit p
             heading_style="ATX",
             strip_unwanted_tags=True,
             preserve_images=True,
-            include_toc=True,
             clean_filenames=True,
         )
         result = await convert_epub_to_markdown(
@@ -609,7 +588,6 @@ async def main_async(args):  # noqa: PLR0911 - CLI function with multiple exit p
             use_pdf_outlines=True,
             max_section_depth=2,
             code_language=None,
-            include_toc=True,
         )
         result = await convert_pdf_to_markdown(
             input_path=input_path,
