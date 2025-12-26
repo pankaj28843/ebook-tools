@@ -1,0 +1,699 @@
+"""Unit tests for PDF to Markdown converter."""
+
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+
+from ebook_tools.cli import convert_docs
+from ebook_tools.epub_models import EpubChapter, EpubSection
+from ebook_tools.pdf_converter import PdfConverter, PdfConverterConfig
+
+
+class _FakePage:
+    def __init__(self, has_images: bool):
+        self._has_images = has_images
+
+    def get_images(self):
+        return [("img",)] if self._has_images else []
+
+
+class _FakePdfDoc:
+    def __init__(self, metadata: dict, toc: list[list], images_per_page: list[bool]):
+        self.metadata = metadata
+        self._toc = toc
+        self._images = images_per_page
+        self.page_count = len(images_per_page)
+        self.closed = False
+
+    def get_toc(self, simple: bool = False):
+        return self._toc
+
+    def __getitem__(self, idx: int):
+        return _FakePage(self._images[idx])
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestPdfInspection:
+    """Unit tests for the lightweight PDF inspection helper."""
+
+    async def test_inspect_pdf_extracts_metadata(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        pdf_path = tmp_path / "book.pdf"
+        pdf_path.write_bytes(b"data" * 1024)
+        fake_doc = _FakePdfDoc(
+            metadata={
+                "title": "Sample PDF",
+                "author": "Doc Writer",
+                "subject": "Testing",
+                "creator": "CI",
+                "producer": "PyMuPDF",
+                "keywords": "tests",
+            },
+            toc=[[1, "Chapter 1", 1]],
+            images_per_page=[True, False, False],
+        )
+        fake_module = SimpleNamespace(open=lambda _: fake_doc)
+        monkeypatch.setitem(sys.modules, "fitz", fake_module)
+
+        info = await convert_docs.inspect_pdf(pdf_path)
+
+        assert info is not None
+        assert info.title == "Sample PDF"
+        assert info.author == "Doc Writer"
+        assert info.has_outline is True
+        assert info.has_images is True
+        assert info.pages_count == 3
+        expected_size = round(pdf_path.stat().st_size / (1024 * 1024), 2)
+        assert info.file_size_mb == expected_size
+        assert fake_doc.closed is True
+
+    async def test_inspect_pdf_handles_missing_metadata(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        pdf_path = tmp_path / "empty.pdf"
+        pdf_path.write_bytes(b"0" * 10)
+        fake_doc = _FakePdfDoc(metadata={}, toc=[], images_per_page=[False, False])
+        fake_module = SimpleNamespace(open=lambda _: fake_doc)
+        monkeypatch.setitem(sys.modules, "fitz", fake_module)
+
+        info = await convert_docs.inspect_pdf(pdf_path)
+
+        assert info is not None
+        assert info.title == "Unknown Title"
+        assert info.has_outline is False
+        assert info.has_images is False
+
+
+@pytest.mark.unit
+class TestPdfConverterConfig:
+    """Test PdfConverterConfig dataclass."""
+
+    def test_default_config(self):
+        """Test default configuration values."""
+        config = PdfConverterConfig()
+        assert config.preserve_images is True
+        assert config.clean_filenames is True
+        assert config.use_pdf_outlines is True
+        assert config.max_section_depth == 2
+        assert config.code_language is None
+        assert config.include_toc is True
+        assert config.heading_style == "ATX"
+
+    def test_custom_config(self):
+        """Test custom configuration values."""
+        config = PdfConverterConfig(
+            preserve_images=False,
+            clean_filenames=False,
+            use_pdf_outlines=False,
+            max_section_depth=3,
+            code_language="python",
+            include_toc=False,
+            heading_style="setext",
+        )
+        assert config.preserve_images is False
+        assert config.clean_filenames is False
+        assert config.use_pdf_outlines is False
+        assert config.max_section_depth == 3
+        assert config.code_language == "python"
+        assert config.include_toc is False
+        assert config.heading_style == "setext"
+
+
+@pytest.mark.unit
+class TestPdfConverter:
+    """Test PdfConverter class."""
+
+    def test_init_default_config(self):
+        """Test converter initialization with default config."""
+        converter = PdfConverter()
+        assert converter.config is not None
+        assert isinstance(converter.config, PdfConverterConfig)
+        assert converter._images_extracted == {}
+
+    def test_init_custom_config(self):
+        """Test converter initialization with custom config."""
+        config = PdfConverterConfig(preserve_images=False)
+        converter = PdfConverter(config)
+        assert converter.config == config
+        assert converter.config.preserve_images is False
+
+    def test_clean_filename(self):
+        """Test filename cleaning."""
+        converter = PdfConverter()
+
+        # Basic cleaning
+        assert converter._clean_filename("Chapter 1: Introduction") == "chapter-1-introduction"
+
+        # Special characters
+        assert converter._clean_filename("Chapter 1: Introduction!?") == "chapter-1-introduction"
+
+        # Multiple spaces
+        assert converter._clean_filename("Chapter   1   Introduction") == "chapter-1-introduction"
+
+        # Leading/trailing dashes
+        assert converter._clean_filename("- Introduction -") == "introduction"
+
+        # Empty after cleaning
+        assert converter._clean_filename("!!!") == "unnamed"
+
+        # Long filename (truncate to 100 chars)
+        long_name = "a" * 150
+        result = converter._clean_filename(long_name)
+        assert len(result) == 100
+
+    def test_extract_book_title_with_metadata(self):
+        """Test book title extraction from PDF metadata."""
+        converter = PdfConverter()
+
+        # Mock document with title metadata
+        mock_doc = Mock()
+        mock_doc.metadata = {"title": "My Book Title"}
+
+        result = converter._extract_book_title(mock_doc)
+        assert result == "My Book Title"
+
+    def test_extract_book_title_without_metadata(self):
+        """Test book title fallback when no metadata."""
+        converter = PdfConverter()
+
+        # Mock document without title
+        mock_doc = Mock()
+        mock_doc.metadata = {}
+
+        result = converter._extract_book_title(mock_doc)
+        assert result == "Untitled PDF"
+
+    def test_split_markdown_by_heading_simple(self):
+        """Test splitting markdown by ## headings."""
+        converter = PdfConverter()
+
+        md_text = """# Chapter 1
+
+Some intro text.
+
+## Section 1
+
+Section 1 content.
+
+## Section 2
+
+Section 2 content.
+"""
+
+        sections = converter._split_markdown_by_heading(md_text, "Chapter 1")
+        assert len(sections) == 3
+
+        # Introduction section
+        assert sections[0][0] == "Introduction"
+        assert "Some intro text" in sections[0][1]
+
+        # Section 1
+        assert sections[1][0] == "Section 1"
+        assert "Section 1 content" in sections[1][1]
+
+        # Section 2
+        assert sections[2][0] == "Section 2"
+        assert "Section 2 content" in sections[2][1]
+
+    def test_split_markdown_by_heading_no_sections(self):
+        """Test markdown without ## headings."""
+        converter = PdfConverter()
+
+        md_text = """# Chapter 1
+
+All content in one section."""
+
+        sections = converter._split_markdown_by_heading(md_text, "Chapter 1")
+        assert len(sections) == 1
+        assert sections[0][0] == "Chapter 1"
+        assert "All content in one section" in sections[0][1]
+
+    def test_split_markdown_by_heading_no_intro(self):
+        """Test markdown starting with ## heading."""
+        converter = PdfConverter()
+
+        md_text = """## Section 1
+
+Section 1 content.
+
+## Section 2
+
+Section 2 content.
+"""
+
+        sections = converter._split_markdown_by_heading(md_text, "Chapter 1")
+        assert len(sections) == 2
+        assert sections[0][0] == "Section 1"
+        assert sections[1][0] == "Section 2"
+
+
+class TestPdfConverterNumbering:
+    """Covers chapter and section numbering helpers."""
+
+    def test_apply_chapter_and_section_numbering(self, tmp_path: Path):
+        converter = PdfConverter()
+        chapter_dir = tmp_path / "chapter-temp-0001"
+        chapter_dir.mkdir()
+        section_one = chapter_dir / "section-temp-0001.md"
+        section_one.write_text("alpha", encoding="utf-8")
+        section_two = chapter_dir / "section-temp-0002.md"
+        section_two.write_text("beta", encoding="utf-8")
+
+        chapter = EpubChapter(
+            title="Intro Chapter",
+            folder_name="chapter-temp-0001",
+            folder_path=str(chapter_dir),
+            sections=[
+                EpubSection(
+                    title="Alpha Overview",
+                    filename=section_one.name,
+                    file_path=str(section_one),
+                    word_count=10,
+                    character_count=20,
+                    slug_hint="alpha",
+                ),
+                EpubSection(
+                    title="Second Section",
+                    filename=section_two.name,
+                    file_path=str(section_two),
+                    word_count=5,
+                    character_count=12,
+                    slug_hint=None,
+                ),
+            ],
+            source_file="book.pdf",
+        )
+
+        converter._apply_chapter_numbering([chapter])
+
+        new_dir = Path(chapter.folder_path)
+        assert new_dir.name == "intro-chapter"
+        assert chapter.sections[0].filename.startswith("1.1-alpha")
+        assert chapter.sections[1].filename.startswith("1.2-second-section")
+        assert (new_dir / chapter.sections[0].filename).exists()
+        assert (new_dir / chapter.sections[1].filename).exists()
+
+    def test_apply_chapter_numbering_removes_existing_slug(self, tmp_path: Path):
+        converter = PdfConverter()
+        stale_dir = tmp_path / "intro-chapter"
+        stale_dir.mkdir()
+        (stale_dir / "old.md").write_text("old", encoding="utf-8")
+
+        chapter_dir = tmp_path / "chapter-temp-0001"
+        chapter_dir.mkdir()
+        section_path = chapter_dir / "section-temp-0001.md"
+        section_path.write_text("alpha", encoding="utf-8")
+
+        section = EpubSection(
+            title="Intro",
+            filename=section_path.name,
+            file_path=str(section_path),
+            word_count=5,
+            character_count=12,
+            slug_hint="intro",
+        )
+
+        chapter = EpubChapter(
+            title="Intro Chapter",
+            folder_name=chapter_dir.name,
+            folder_path=str(chapter_dir),
+            sections=[section],
+            source_file="book.pdf",
+        )
+
+        converter._apply_chapter_numbering([chapter])
+
+        assert Path(chapter.folder_path).name == "intro-chapter"
+        assert not (stale_dir / "old.md").exists()
+
+    def test_add_code_language_hints(self):
+        """Test adding language hints to code fences."""
+        converter = PdfConverter()
+
+        md_text = """Some text.
+
+```
+def hello():
+    print("world")
+```
+
+More text.
+
+```
+another code block
+```
+"""
+
+        result = converter._add_code_language_hints(md_text, "python")
+
+        # Should add python to opening code fences (``` at start of line)
+        # Regex replaces ```\s*$ which matches both opening and closing ```
+        # So we get ```python for both opening and closing
+        assert "```python" in result
+        # Count should be 4 (2 opening + 2 closing)
+        assert result.count("```python") == 4
+
+    def test_fix_image_paths(self):
+        """Test fixing image paths in markdown."""
+        converter = PdfConverter(PdfConverterConfig(preserve_images=True))
+
+        chapter_dir = Path("/tmp/chapter-01")
+        images_dir = Path("/tmp/images")
+
+        content = """# Chapter
+
+Some text.
+
+![Figure 1](image1.png)
+
+More text.
+
+![Figure 2](image2.png)
+"""
+
+        result = converter._fix_image_paths(content, images_dir, chapter_dir)
+
+        # Images should be prefixed with ../images/
+        assert "![Figure 1](../images/image1.png)" in result
+        assert "![Figure 2](../images/image2.png)" in result
+
+    def test_fix_image_paths_preserves_absolute_paths(self):
+        """Test that absolute paths are not modified."""
+        converter = PdfConverter(PdfConverterConfig(preserve_images=True))
+
+        chapter_dir = Path("/tmp/chapter-01")
+        images_dir = Path("/tmp/images")
+
+        content = """![Absolute](/absolute/path/image.png)
+![Relative already](../images/existing.png)
+"""
+
+        result = converter._fix_image_paths(content, images_dir, chapter_dir)
+
+        # Should not modify absolute or already-relative paths
+        assert "![Absolute](/absolute/path/image.png)" in result
+        assert "![Relative already](../images/existing.png)" in result
+
+    def test_fix_image_paths_disabled(self):
+        """Test that image path fixing is skipped when disabled."""
+        converter = PdfConverter(PdfConverterConfig(preserve_images=False))
+
+        chapter_dir = Path("/tmp/chapter-01")
+        images_dir = Path("/tmp/images")
+
+        content = "![Figure](image.png)"
+        result = converter._fix_image_paths(content, images_dir, chapter_dir)
+
+        # Should not modify when preserve_images is False
+        assert result == content
+
+    def test_split_markdown_by_heading_groups_sections(self):
+        """Split text with intro and multiple headings into sections."""
+        converter = PdfConverter()
+        md_text = """This is the introduction paragraph.
+It should become the Introduction section.
+
+## First Section
+Content for the first section.
+
+## Second Section
+Content for the second section."""
+
+        sections = converter._split_markdown_by_heading(md_text, "Chapter Title")
+
+        assert sections[0][0] == "Introduction"
+        assert "introduction paragraph" in sections[0][1].lower()
+        assert sections[1][0] == "First Section"
+        assert "first section" in sections[1][1]
+        assert sections[2][0] == "Second Section"
+
+    def test_split_markdown_by_heading_without_sections_returns_full_content(self):
+        """If no headings appear, return a single section using the chapter title."""
+        converter = PdfConverter()
+        content = "Just a body of text with no headings."
+
+        sections = converter._split_markdown_by_heading(content, "Solo Chapter")
+
+        assert sections == [("Solo Chapter", content)]
+
+    def test_extract_chapters_info_with_outline(self):
+        """Test chapter extraction from PDF outline."""
+        converter = PdfConverter(PdfConverterConfig(use_pdf_outlines=True))
+
+        # Mock document with outline
+        mock_doc = Mock()
+        mock_doc.page_count = 100
+        mock_doc.get_toc.return_value = [
+            [1, "Chapter 1", 1],  # Level 1, page 1
+            [2, "Section 1.1", 5],  # Level 2, page 5
+            [1, "Chapter 2", 20],  # Level 1, page 20
+            [1, "Chapter 3", 50],  # Level 1, page 50
+        ]
+
+        chapters_info = converter._extract_chapters_info(mock_doc)
+
+        assert len(chapters_info) == 3
+
+        # Chapter 1: pages 0-19 (0-indexed, end before chapter 2)
+        assert chapters_info[0] == ("Chapter 1", 0, 19)
+
+        # Chapter 2: pages 19-49
+        assert chapters_info[1] == ("Chapter 2", 19, 49)
+
+        # Chapter 3: pages 49-100 (to end)
+        assert chapters_info[2] == ("Chapter 3", 49, 100)
+
+    def test_extract_chapters_info_without_outline(self):
+        """Test chapter extraction fallback when no outline."""
+        converter = PdfConverter(PdfConverterConfig(use_pdf_outlines=True))
+
+        # Mock document without outline
+        mock_doc = Mock()
+        mock_doc.page_count = 50
+        mock_doc.get_toc.return_value = []
+
+        chapters_info = converter._extract_chapters_info(mock_doc)
+
+        # Should return single "Full Document" chapter
+        assert len(chapters_info) == 1
+        assert chapters_info[0] == ("Full Document", 0, 50)
+
+    def test_extract_chapters_info_outline_disabled(self):
+        """Test chapter extraction when outline use is disabled."""
+        converter = PdfConverter(PdfConverterConfig(use_pdf_outlines=False))
+
+        # Mock document with outline (but disabled in config)
+        mock_doc = Mock()
+        mock_doc.page_count = 50
+        mock_doc.get_toc.return_value = [
+            [1, "Chapter 1", 1],
+            [1, "Chapter 2", 20],
+        ]
+
+        chapters_info = converter._extract_chapters_info(mock_doc)
+
+        # Should ignore outline and return full document
+        assert len(chapters_info) == 1
+        assert chapters_info[0] == ("Full Document", 0, 50)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestPdfConverterAsync:
+    """Test async methods of PdfConverter."""
+
+    async def test_convert_pdf_to_markdown_file_not_found(self):
+        """Test error handling when PDF file doesn't exist."""
+        converter = PdfConverter()
+
+        with pytest.raises(FileNotFoundError, match="PDF file not found"):
+            await converter.convert_pdf_to_markdown(
+                pdf_path="/nonexistent/file.pdf",
+                output_dir="/tmp/output",
+            )
+
+    async def test_create_section_file_empty_content(self):
+        """Test that empty sections are not created."""
+        converter = PdfConverter()
+
+        result = await converter._create_section_file(
+            section_title="Empty Section",
+            section_content="",
+            section_index=1,
+            chapter_dir=Path("/tmp/chapter"),
+            images_dir=Path("/tmp/images"),
+        )
+
+        assert result is None
+
+    async def test_create_section_file_whitespace_only(self):
+        """Test that whitespace-only sections are not created."""
+        converter = PdfConverter()
+
+        result = await converter._create_section_file(
+            section_title="Whitespace Section",
+            section_content="   \n\n   ",
+            section_index=1,
+            chapter_dir=Path("/tmp/chapter"),
+            images_dir=Path("/tmp/images"),
+        )
+
+        assert result is None
+
+    async def test_convert_pdf_to_markdown_reports_markdown_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Ensure failures from pymupdf4llm surface to the caller."""
+        pdf_path = tmp_path / "book.pdf"
+        pdf_path.write_text("fake", encoding="utf-8")
+        output_dir = tmp_path / "converted"
+
+        class FakeDoc:
+            def __init__(self):
+                self.metadata = {"title": "Failure"}
+                self.page_count = 1
+
+            def get_toc(self, simple: bool = False):
+                return []
+
+            def close(self):
+                pass
+
+        fake_doc = FakeDoc()
+        monkeypatch.setattr("ebook_tools.pdf_converter.fitz.open", lambda _: fake_doc)
+
+        def failing_markdown(*args, **kwargs):
+            raise RuntimeError("markdown extraction failed")
+
+        monkeypatch.setattr("ebook_tools.pdf_converter.pymupdf4llm.to_markdown", failing_markdown)
+
+        converter = PdfConverter()
+        with pytest.raises(RuntimeError, match="markdown extraction failed"):
+            await converter.convert_pdf_to_markdown(pdf_path, output_dir)
+
+    @pytest.mark.asyncio
+    async def test_convert_pdf_to_markdown_discards_empty_chapters(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Empty markdown extraction should drop temporary chapter folders."""
+        pdf_path = tmp_path / "book.pdf"
+        pdf_path.write_text("fake", encoding="utf-8")
+        output_dir = tmp_path / "converted"
+
+        class FakeDoc:
+            def __init__(self):
+                self.metadata = {"title": "Empty"}
+                self.page_count = 4
+                self.closed = False
+
+            def get_toc(self, simple: bool = False):
+                return [[1, "Lone Chapter", 1]]
+
+            def close(self):
+                self.closed = True
+
+        fake_doc = FakeDoc()
+        monkeypatch.setattr("ebook_tools.pdf_converter.fitz.open", lambda _: fake_doc)
+        monkeypatch.setattr("ebook_tools.pdf_converter.pymupdf4llm.to_markdown", lambda *args, **kwargs: "   ")
+
+        removed_paths: list[Path] = []
+
+        def fake_rmtree(path: str | Path, ignore_errors: bool = True):
+            removed_paths.append(Path(path))
+
+        monkeypatch.setattr("ebook_tools.pdf_converter.shutil.rmtree", fake_rmtree)
+
+        converter = PdfConverter(PdfConverterConfig(preserve_images=False))
+        result = await converter.convert_pdf_to_markdown(pdf_path, output_dir)
+
+        assert fake_doc.closed is True
+        assert result.chapters_count == 0
+        assert removed_paths, "Empty chapter folders should be cleaned up"
+
+    @pytest.mark.asyncio
+    async def test_convert_pdf_to_markdown_builds_toc(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """End-to-end conversion should produce chapters, sections, and toc artifacts."""
+        pdf_path = tmp_path / "book.pdf"
+        pdf_path.write_text("fake-pdf", encoding="utf-8")
+        output_dir = tmp_path / "output"
+
+        class FakeDoc:
+            def __init__(self):
+                self.metadata = {"title": "PDF Title"}
+                self.page_count = 10
+                self.closed = False
+
+            def get_toc(self, simple: bool = False):
+                return [
+                    [1, "Chapter One", 1],
+                    [1, "Chapter Two", 3],
+                ]
+
+            def close(self):
+                self.closed = True
+
+        class MarkdownStub:
+            def __init__(self):
+                self.calls = 0
+
+            def __call__(
+                self,
+                doc,
+                *,
+                pages,
+                page_chunks,
+                write_images,
+                image_path,
+                image_format,
+            ):
+                self.calls += 1
+                assert isinstance(pages, list)
+                assert page_chunks is False
+                return "## Section Alpha\nBody\n## Section Beta\nMore"
+
+        fake_doc = FakeDoc()
+        markdown_stub = MarkdownStub()
+
+        monkeypatch.setattr("ebook_tools.pdf_converter.fitz.open", lambda _: fake_doc)
+        monkeypatch.setattr("ebook_tools.pdf_converter.pymupdf4llm.to_markdown", markdown_stub)
+
+        converter = PdfConverter(PdfConverterConfig(preserve_images=False))
+        result = await converter.convert_pdf_to_markdown(pdf_path, output_dir)
+
+        assert fake_doc.closed is True
+        assert result.book_title == "PDF Title"
+        assert result.chapters_count == 2
+        assert result.sections_count == 4
+        assert (output_dir / "README.md").exists()
+        assert result.table_of_contents_path and Path(result.table_of_contents_path).exists()
+        assert result.toc_json_path and Path(result.toc_json_path).exists()
+
+        first_chapter = result.chapters[0]
+        assert first_chapter.folder_name == "chapter-one"
+        assert Path(first_chapter.folder_path).exists()
+        first_section = first_chapter.sections[0]
+        assert first_section.filename.startswith("1.")
+        assert Path(first_section.file_path).exists()
+
+    @pytest.mark.asyncio
+    async def test_convert_pdf_to_markdown_propagates_fitz_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """fitz.open errors should bubble up for caller handling."""
+        pdf_path = tmp_path / "locked.pdf"
+        pdf_path.write_text("data", encoding="utf-8")
+        output_dir = tmp_path / "out"
+
+        monkeypatch.setattr(
+            "ebook_tools.pdf_converter.fitz.open",
+            Mock(side_effect=RuntimeError("password protected")),
+        )
+
+        converter = PdfConverter()
+
+        with pytest.raises(RuntimeError):
+            await converter.convert_pdf_to_markdown(pdf_path, output_dir)
