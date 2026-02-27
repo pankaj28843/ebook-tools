@@ -24,8 +24,11 @@ Usage:
     # Inspect file before conversion
     uv run convert-docs --inspect book.epub
 
-    # Use custom output directory (default: ./converted-docs/<slug>)
-    uv run convert-docs --input book.epub --output ./docs/my-book
+    # Use custom output directory (alias: --output-dir)
+    uv run convert-docs --input book.epub --output-dir ./docs/my-book
+
+    # Use environment variables for output directory
+    CONVERT_DOCS_OUTPUT_DIR=./books uv run convert-docs --input book.epub
 
     # Keep the legacy flat layout
     uv run convert-docs --input guide.epub --max-output-depth 1
@@ -34,6 +37,7 @@ Usage:
 import argparse
 import asyncio
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -67,6 +71,7 @@ SUPPORTED_FORMATS = {
 
 # Planned future format support
 FUTURE_FORMATS = ["mobi"]
+OUTPUT_DIR_ENV_VARS = ("CONVERT_DOCS_OUTPUT_DIR", "EBOOK_TOOLS_OUTPUT_DIR")
 
 
 def _slugify_name(value: str | None) -> str:
@@ -79,13 +84,26 @@ def _slugify_name(value: str | None) -> str:
     return slug or "book"
 
 
-def _determine_output_dir(input_path: Path, explicit_output: str | None) -> tuple[Path, bool]:
+def _resolve_configured_output_dir(explicit_output: str | None) -> tuple[Path | None, str | None]:
     if explicit_output:
-        return Path(explicit_output).expanduser().resolve(), False
+        return Path(explicit_output).expanduser().resolve(), "--output/--output-dir"
+
+    for env_var in OUTPUT_DIR_ENV_VARS:
+        value = os.environ.get(env_var)
+        if value and value.strip():
+            return Path(value.strip()).expanduser().resolve(), f"${env_var}"
+
+    return None, None
+
+
+def _determine_output_dir(input_path: Path, explicit_output: str | None) -> tuple[Path, bool, str | None]:
+    configured_output, source = _resolve_configured_output_dir(explicit_output)
+    if configured_output is not None:
+        return configured_output, False, source
 
     default_base = Path.cwd() / "converted-docs"
     slug = _slugify_name(input_path.stem)
-    return (default_base / slug).resolve(), True
+    return (default_base / slug).resolve(), True, None
 
 
 def detect_format(file_path: Path) -> str | None:
@@ -448,7 +466,7 @@ async def main_async(args):  # noqa: PLR0911 - CLI function with multiple exit p
                 return 0
         return 1
 
-    output_dir, auto_output = _determine_output_dir(input_path, args.output)
+    output_dir, auto_output, output_source = _determine_output_dir(input_path, args.output)
     if auto_output:
         logger.info(f"Using default output directory: {output_dir}")
 
@@ -457,6 +475,8 @@ async def main_async(args):  # noqa: PLR0911 - CLI function with multiple exit p
     print(f"📂 Output: {output_dir}")
     if auto_output:
         print("    (auto-derived from input filename)")
+    elif output_source:
+        print(f"    (from {output_source})")
 
     if args.title:
         print(f"📖 Title: {args.title}")
@@ -540,8 +560,10 @@ For more information, see: https://github.com/pankaj28843/docs-mcp-server
 
     parser.add_argument(
         "--output",
+        "--output-dir",
         "-o",
-        help="Output directory for converted Markdown (default: ./converted-docs/<slug>)",
+        dest="output",
+        help="Output directory for converted Markdown (default: ./converted-docs/<slug>; env: CONVERT_DOCS_OUTPUT_DIR or EBOOK_TOOLS_OUTPUT_DIR)",
     )
 
     parser.add_argument(
