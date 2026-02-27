@@ -470,21 +470,23 @@ def test_slugify_name_defaults_for_none() -> None:
 
 @pytest.mark.unit
 def test_determine_output_dir_prefers_explicit_value(tmp_path: Path) -> None:
-    derived, auto = convert_docs._determine_output_dir(
+    derived, auto, source = convert_docs._determine_output_dir(
         tmp_path / "sample.epub",
         str(tmp_path / "custom"),
     )
 
     assert auto is False
+    assert source == "--output/--output-dir"
     assert derived == (tmp_path / "custom").resolve()
 
 
 @pytest.mark.unit
 def test_determine_output_dir_derives_slug(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
-    derived, auto = convert_docs._determine_output_dir(tmp_path / "Guide Book.epub", explicit_output=None)
+    derived, auto, source = convert_docs._determine_output_dir(tmp_path / "Guide Book.epub", explicit_output=None)
 
     assert auto is True
+    assert source is None
     assert derived == (tmp_path / "converted-docs" / "guide-book").resolve()
 
 
@@ -559,3 +561,23 @@ def test_module_entrypoint_invokes_main(monkeypatch: pytest.MonkeyPatch) -> None
 
     assert excinfo.value.code == 0
     assert "coro" in called
+
+
+@pytest.mark.unit
+def test_determine_output_dir_uses_env_var(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("CONVERT_DOCS_OUTPUT_DIR", "./books")
+    monkeypatch.chdir(tmp_path)
+
+    derived, auto, source = convert_docs._determine_output_dir(tmp_path / "Guide Book.epub", explicit_output=None)
+
+    assert auto is False
+    assert source == "$CONVERT_DOCS_OUTPUT_DIR"
+    assert derived == (tmp_path / "books").resolve()
+
+
+@pytest.mark.unit
+def test_parse_cli_args_accepts_output_dir_alias() -> None:
+    args = convert_docs.parse_cli_args(["--output-dir", "./books", "guide.epub"])
+
+    assert args.input == "guide.epub"
+    assert args.output == "./books"
