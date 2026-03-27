@@ -33,10 +33,18 @@ class _FakeOcrPage:
         return fitz.Rect(0, 0, 612, 792)
 
 
+_GOOD_TEXT = "The quick brown fox jumps over the lazy dog. " * 5  # 225 chars of realistic text
+
+
 @pytest.mark.unit
 class TestOcrDetection:
     def test_page_needs_ocr_with_text(self):
-        page = _FakeOcrPage(text="A" * 100)
+        page = _FakeOcrPage(text=_GOOD_TEXT, image_coverage=0.0)
+        assert _page_needs_ocr(page) is False
+
+    def test_page_needs_ocr_with_good_text_and_images(self):
+        # Good text + images = no OCR needed
+        page = _FakeOcrPage(text=_GOOD_TEXT, image_coverage=0.8)
         assert _page_needs_ocr(page) is False
 
     def test_page_needs_ocr_scanned(self):
@@ -47,11 +55,17 @@ class TestOcrDetection:
         page = _FakeOcrPage(text="", image_coverage=0.0)
         assert _page_needs_ocr(page) is False
 
+    def test_page_needs_ocr_bad_quality_text(self):
+        # Garbled OCR text with images should trigger re-OCR
+        garbled = "CLCN NCCC RNR TCT MTD CVSS NDS CNT PRS xAlIO VOMAIN " * 5
+        page = _FakeOcrPage(text=garbled, image_coverage=0.8)
+        assert _page_needs_ocr(page) is True
+
     def test_detect_pdf_type_text(self):
         class FakeDoc:
             page_count = 5
             def __getitem__(self, idx):
-                return _FakeOcrPage(text="A" * 200)
+                return _FakeOcrPage(text=_GOOD_TEXT, image_coverage=0.0)
         assert detect_pdf_type(FakeDoc()) == "text"
 
     def test_detect_pdf_type_scanned(self):
@@ -67,7 +81,7 @@ class TestOcrDetection:
             def __getitem__(self, idx):
                 if idx < 1:
                     return _FakeOcrPage(text="", image_coverage=0.9)
-                return _FakeOcrPage(text="A" * 200)
+                return _FakeOcrPage(text=_GOOD_TEXT, image_coverage=0.0)
         assert detect_pdf_type(FakeDoc()) == "mixed"
 
     def test_detect_pdf_type_empty(self):
@@ -79,6 +93,16 @@ class TestOcrDetection:
         config = PdfConverterConfig(ocr_language="deu+eng", ocr_dpi=400)
         assert config.ocr_language == "deu+eng"
         assert config.ocr_dpi == 400
+
+    def test_text_quality_score(self):
+        from ebook_tools.pdf_converter import _text_quality_score
+        # Good text
+        assert _text_quality_score(_GOOD_TEXT) > 0.9
+        # Garbled text
+        garbled = "CLCN NCCC RNR TCT MTD CVSS NDS CNT PRS"
+        assert _text_quality_score(garbled) < 0.5
+        # Empty
+        assert _text_quality_score("") == 0.0
 
 
 class _FakePage:

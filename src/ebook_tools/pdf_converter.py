@@ -43,6 +43,46 @@ logger = logging.getLogger(__name__)
 _MIN_TEXT_CHARS = 50
 # Minimum fraction of pages that must be scanned to treat the whole document as scanned
 _SCANNED_PAGE_THRESHOLD = 0.5
+# If more than this fraction of characters are "garbage", the OCR layer is bad
+_GARBAGE_CHAR_THRESHOLD = 0.15
+
+
+def _text_quality_score(text: str) -> float:
+    """Return fraction of text that looks like valid readable content (0.0-1.0).
+
+    Checks for common bad-OCR patterns:
+    - Replacement characters (U+FFFD)
+    - Words that are all-consonant uppercase (e.g. "CLCN", "NCCC", "RNR")
+    - Excessive punctuation runs
+    - Short nonsense words (2-3 uppercase chars with no vowels)
+    """
+    if not text:
+        return 0.0
+
+    words = re.findall(r"[A-Za-z]{2,}", text)
+    if not words:
+        return 0.0
+
+    garbage_words = 0
+    for word in words:
+        upper = word.upper()
+        # All-consonant words of 2+ chars are likely garbage
+        if len(word) >= 2 and not re.search(r"[AEIOU]", upper):
+            garbage_words += 1
+        # Single repeated char
+        elif len(set(word.lower())) == 1 and len(word) >= 3:
+            garbage_words += 1
+
+    # Also count replacement chars and excessive punctuation
+    extra_garbage = text.count("\ufffd")
+    punct_runs = re.findall(r"[.:;,!?]{4,}", text)
+    extra_garbage += sum(len(r) for r in punct_runs)
+
+    total_signals = len(words) + (extra_garbage / 5 if extra_garbage else 0)
+    if total_signals == 0:
+        return 1.0
+
+    return max(0.0, 1.0 - (garbage_words + extra_garbage / 5) / total_signals)
 
 
 class PdfConverterConfig(BaseModel):
@@ -83,29 +123,33 @@ def _is_tesseract_available() -> bool:
 def _page_needs_ocr(page: fitz.Page) -> bool:
     """Determine if a page is scanned/image-based and needs OCR.
 
-    A page needs OCR when it has very little extractable text
-    but significant image coverage.
+    A page needs OCR when:
+    - It has very little extractable text but significant image coverage, OR
+    - It has text but the quality is poor (garbled OCR from a previous pass)
     """
     text = page.get_text("text").strip()
-    if len(text) >= _MIN_TEXT_CHARS:
-        return False
 
     # Check if the page has images covering a significant area
     images = page.get_image_info()
-    if not images:
-        return False
-
     page_area = abs(page.rect)
-    if page_area == 0:
-        return False
 
-    img_coverage = 0.0
-    for img in images:
-        img_rect = fitz.Rect(img["bbox"]) & page.rect
-        img_coverage += abs(img_rect)
+    has_large_images = False
+    if images and page_area > 0:
+        img_coverage = 0.0
+        for img in images:
+            img_rect = fitz.Rect(img["bbox"]) & page.rect
+            img_coverage += abs(img_rect)
+        has_large_images = (img_coverage / page_area) > 0.3
 
-    img_ratio = img_coverage / page_area
-    return img_ratio > 0.3
+    # No text + large images = scanned page
+    if len(text) < _MIN_TEXT_CHARS:
+        return has_large_images
+
+    # Has text but check quality — bad existing OCR should be re-done
+    if has_large_images and _text_quality_score(text) < (1.0 - _GARBAGE_CHAR_THRESHOLD):
+        return True
+
+    return False
 
 
 def detect_pdf_type(doc: fitz.Document, sample_pages: int = 10) -> str:
@@ -295,10 +339,17 @@ class PdfConverter(BaseConverter):
             image_format="png",
         )
 
-        # If result is mostly empty, try OCR for scanned pages
-        if self._text_is_insufficient(markdown_text, len(page_range)):
+        # If result is mostly empty or has poor-quality text, try OCR
+        needs_ocr = self._text_is_insufficient(markdown_text, len(page_range))
+        if not needs_ocr:
+            quality = _text_quality_score(markdown_text)
+            if quality < (1.0 - _GARBAGE_CHAR_THRESHOLD):
+                needs_ocr = True
+                logger.info("Chapter text quality %.0f%% below threshold, attempting OCR", quality * 100)
+
+        if needs_ocr:
             ocr_text = self._ocr_pages(doc, page_range)
-            if ocr_text and len(ocr_text.strip()) > len(markdown_text.strip()):
+            if ocr_text and len(ocr_text.strip()) > len(markdown_text.strip()) // 2:
                 markdown_text = ocr_text
 
         if self.config.code_language:
@@ -338,7 +389,11 @@ class PdfConverter(BaseConverter):
         return len(text_only) < max(num_pages * 20, _MIN_TEXT_CHARS)
 
     def _ocr_pages(self, doc: fitz.Document, page_range: list[int]) -> str:
-        """Run OCR on the given pages and return combined markdown-formatted text."""
+        """Run OCR on the given pages and return combined markdown-formatted text.
+
+        When called, OCRs every page in the range regardless of existing text,
+        since the caller already determined the overall quality is insufficient.
+        """
         if not _is_tesseract_available():
             return ""
 
@@ -347,12 +402,6 @@ class PdfConverter(BaseConverter):
             try:
                 page = doc[page_num]
             except (IndexError, TypeError, KeyError):
-                continue
-            if not _page_needs_ocr(page):
-                # Page has text already -- extract normally
-                text = page.get_text("text").strip()
-                if text:
-                    parts.append(text)
                 continue
 
             try:
@@ -366,6 +415,13 @@ class PdfConverter(BaseConverter):
                     parts.append(text)
             except Exception as e:
                 logger.warning("OCR failed for page %d: %s", page_num, e)
+                # Fall back to existing text
+                try:
+                    text = page.get_text("text").strip()
+                    if text:
+                        parts.append(text)
+                except Exception:
+                    pass
 
         if not parts:
             return ""
