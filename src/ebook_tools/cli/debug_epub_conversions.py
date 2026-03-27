@@ -3,18 +3,26 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
-import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Annotated, Optional
+
+import typer
+from rich.console import Console
+from slugify import slugify
 
 LOG = logging.getLogger("ebook_tools.debug_epub_conversions")
+console = Console()
+
+app = typer.Typer(
+    name="debug-epub-conversions",
+    help="Batch convert many EPUB files and validate their TOCs.",
+)
 
 
 @dataclass(slots=True)
@@ -62,7 +70,7 @@ class JobRunner:
 
         results: list[JobResult] = []
         for index, epub_path in enumerate(epub_files, start=1):
-            book_slug = self._slugify(epub_path.stem)
+            book_slug = slugify(epub_path.stem, max_length=80, word_boundary=True, save_order=True) or "book"
             job_output = self.output_dir / book_slug
             job_log = self.logs_dir / f"{book_slug}-convert.log"
             toc_report = self.logs_dir / f"{book_slug}-toc.json"
@@ -105,7 +113,7 @@ class JobRunner:
             "uv",
             "run",
             "convert-docs",
-            "--input",
+            "convert",
             str(epub_path),
             "--output",
             str(job_output),
@@ -137,54 +145,26 @@ class JobRunner:
             log_file.write(f"\n[exit {proc.returncode}]\n")
             return proc.returncode
 
-    def _slugify(self, text: str) -> str:
-        value = text.strip().lower()
-        value = re.sub(r"[^a-z0-9]+", "-", value)
-        value = re.sub(r"-+", "-", value)
-        return value.strip("-") or "book"
 
-
-def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Batch convert many EPUB files using convert-docs")
-    parser.add_argument("--epub-dir", type=Path, required=True, help="Directory containing source EPUB files")
-    parser.add_argument(
-        "--output-base",
-        type=Path,
-        default=Path("/tmp/ebook-tools-epub-runs"),
-        help="Base directory where each EPUB output will be stored",
-    )
-    parser.add_argument(
-        "--logs-dir",
-        type=Path,
-        default=Path("/tmp/ebook-tools-epub-logs"),
-        help="Directory for per-book conversion logs",
-    )
-    parser.add_argument("--limit", type=int, help="Only process the first N EPUB files")
-    parser.add_argument("--overwrite", action="store_true", help="Delete output directory before each run")
-    parser.add_argument(
-        "--toc-depth",
-        type=int,
-        default=2,
-        help="Depth passed to check_epub_toc --max-depth",
-    )
-    return parser.parse_args(argv)
-
-
-def main(argv: list[str] | None = None) -> int:
+@app.command()
+def batch(
+    epub_dir: Annotated[Path, typer.Option(help="Directory containing source EPUB files", exists=True)],
+    output_base: Annotated[Path, typer.Option(help="Base directory for conversion output")] = Path("/tmp/ebook-tools-epub-runs"),
+    logs_dir: Annotated[Path, typer.Option(help="Directory for per-book conversion logs")] = Path("/tmp/ebook-tools-epub-logs"),
+    limit: Annotated[Optional[int], typer.Option(help="Only process the first N EPUB files")] = None,
+    overwrite: Annotated[bool, typer.Option(help="Delete output directory before each run")] = False,
+    toc_depth: Annotated[int, typer.Option(help="Depth for TOC validation")] = 2,
+):
+    """Batch convert EPUB files and optionally validate their TOCs."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    args = parse_args(argv)
-
-    if not args.epub_dir.exists():
-        LOG.error("EPUB directory not found: %s", args.epub_dir)
-        return 2
 
     runner = JobRunner(
-        epub_dir=args.epub_dir,
-        output_dir=args.output_base,
-        logs_dir=args.logs_dir,
-        limit=args.limit,
-        overwrite=args.overwrite,
-        toc_depth=args.toc_depth,
+        epub_dir=epub_dir,
+        output_dir=output_base,
+        logs_dir=logs_dir,
+        limit=limit,
+        overwrite=overwrite,
+        toc_depth=toc_depth,
     )
     results = runner.run()
 
@@ -194,9 +174,22 @@ def main(argv: list[str] | None = None) -> int:
         "convert_failures": [r.name for r in results if r.convert_rc != 0],
         "toc_failures": [r.name for r in results if r.convert_rc == 0 and (r.toc_rc or 0) != 0],
     }
-    print(json.dumps(summary, indent=2))  # noqa: T201
 
-    return 0 if summary["success"] == summary["total"] else 1
+    console.print_json(json.dumps(summary, indent=2))
+
+    raise typer.Exit(0 if summary["success"] == summary["total"] else 1)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Main entry point."""
+    try:
+        if argv is not None:
+            app(argv)
+        else:
+            app()
+        return 0
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 0
 
 
 if __name__ == "__main__":

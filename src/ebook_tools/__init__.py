@@ -1,19 +1,28 @@
 """Reusable ebook/PDF conversion utilities."""
 
+from .converter_base import BaseConverter, make_slug
 from .epub_converter import EpubConverter, EpubConverterConfig
+from .epub_models import Chapter, ConversionResult, EpubInfo, PdfInfo, Section
 from .pdf_converter import PdfConverter, PdfConverterConfig
-from .epub_models import ConversionResult, EpubChapter, EpubSection, EpubInfo, PdfInfo
 from . import toc_checker
 
+# Backward-compatible aliases
+EpubChapter = Chapter
+EpubSection = Section
+
 __all__ = [
-    "EpubConverter",
-    "EpubConverterConfig",
-    "PdfConverter",
-    "PdfConverterConfig",
+    "BaseConverter",
+    "Chapter",
     "ConversionResult",
     "EpubChapter",
-    "EpubSection",
+    "EpubConverter",
+    "EpubConverterConfig",
     "EpubInfo",
+    "EpubSection",
+    "PdfConverter",
+    "PdfConverterConfig",
     "PdfInfo",
+    "Section",
+    "make_slug",
     "toc_checker",
 ]

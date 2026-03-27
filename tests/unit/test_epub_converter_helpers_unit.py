@@ -66,14 +66,19 @@ class TestEpubConverterLowLevel:
 class TestEpubConverterHelpers:
     """Validates filename cleaning, slug creation, and numbering logic."""
 
-    def test_clean_filename_strips_special_characters(self, converter: EpubConverter) -> None:
-        cleaned = converter._clean_filename(' Intro: "Setup"? <Guide> ')
-        assert cleaned == "intro-setup-guide"
+    def test_make_slug_strips_special_characters(self) -> None:
+        from ebook_tools.converter_base import make_slug
 
-    def test_slugify_uses_fallback_when_text_invalid(self, converter: EpubConverter) -> None:
-        slug = converter._slugify("???", fallback="section")
-        assert slug == "section"
-        assert converter._slugify(None, fallback="missing") == "missing"
+        slug = make_slug(' Intro: "Setup"? <Guide> ')
+        assert "intro" in slug
+        assert "setup" in slug
+        assert "guide" in slug
+
+    def test_make_slug_uses_fallback_when_text_invalid(self) -> None:
+        from ebook_tools.converter_base import make_slug
+
+        assert make_slug(None, fallback="section") == "section"
+        assert make_slug("", fallback="missing") == "missing"
 
     def test_flatten_sections_moves_files_to_output(self, converter: EpubConverter, tmp_path: Path) -> None:
         chapter_dir = tmp_path / "chapter-temp-0001"

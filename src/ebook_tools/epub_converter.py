@@ -22,8 +22,6 @@ Typical usage:
 from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
-import re
-import shutil
 import tempfile
 from typing import Any
 import unicodedata
@@ -36,7 +34,8 @@ import markdownify
 from pydantic import BaseModel, Field
 
 from . import toc_checker
-from .epub_models import ConversionResult, EpubChapter, EpubSection
+from .converter_base import BaseConverter, make_slug
+from .epub_models import Chapter, ConversionResult, Section
 
 
 def _normalize_path_value(path: str | None) -> str | None:
@@ -91,8 +90,8 @@ class EpubConverterConfig(BaseModel):
     )
 
 
-class EpubConverter:
-    """Convert EPUB documents into flattened Markdown outputs."""
+class EpubConverter(BaseConverter):
+    """Convert EPUB documents into structured Markdown outputs."""
 
     def __init__(self, config: EpubConverterConfig | None = None) -> None:
         self.config = config or EpubConverterConfig()
@@ -123,18 +122,16 @@ class EpubConverter:
             if self.config.preserve_images:
                 self._extract_images(book, output_dir)
 
-            from ebooklib import ITEM_DOCUMENT
-
-            chapters: list[EpubChapter] = []
+            chapters: list[Chapter] = []
             temp_chapter_index = 1
-            for item in book.get_items_of_type(ITEM_DOCUMENT):
+            for item in self._iter_spine_items(book):
                 chapter = await self._process_chapter(item, output_dir, temp_chapter_index)
                 temp_chapter_index += 1
                 if chapter.sections:
                     chapters.append(chapter)
 
             self._apply_nav_titles(chapters, nav_entries)
-            self._emit_output_files(chapters, output_dir)
+            self._emit_output_files(chapters, output_dir, self.config.max_output_depth)
 
             sections_count = sum(len(chapter.sections) for chapter in chapters)
 
@@ -144,14 +141,20 @@ class EpubConverter:
                 sections_count=sections_count,
                 output_directory=str(output_dir),
                 chapters=chapters,
-                table_of_contents_path=None,
-                toc_json_path=None,
             )
         finally:
             if temp_epub and temp_epub.exists():
                 temp_epub.unlink()
 
-    async def _process_chapter(self, chapter_item: Any, output_dir: Path, temp_index: int) -> EpubChapter:
+    def _iter_spine_items(self, book: epub.EpubBook):
+        """Iterate content documents in spine (reading) order."""
+        spine_ids = [item_id for item_id, _linear in book.spine]
+        for item_id in spine_ids:
+            item = book.get_item_with_id(item_id)
+            if item is not None:
+                yield item
+
+    async def _process_chapter(self, chapter_item: Any, output_dir: Path, temp_index: int) -> Chapter:
         chapter_dir = output_dir / f"chapter-temp-{temp_index:04d}"
         chapter_dir.mkdir(parents=True, exist_ok=True)
 
@@ -168,9 +171,9 @@ class EpubConverter:
         chapter_title, chapter_title_tag = self._extract_chapter_title(soup)
         sections = await self._collect_sections(soup, chapter_title, chapter_title_tag, chapter_dir)
 
-        return EpubChapter(
+        return Chapter(
             title=chapter_title,
-            slug=self._slugify(chapter_title, fallback="chapter"),
+            slug=make_slug(chapter_title, fallback="chapter"),
             working_dir=str(chapter_dir),
             sections=sections,
             source_file=getattr(chapter_item, "get_name", lambda: "")(),
@@ -182,12 +185,12 @@ class EpubConverter:
         chapter_title: str,
         chapter_title_tag: Tag | None,
         chapter_dir: Path,
-    ) -> list[EpubSection]:
+    ) -> list[Section]:
         headings = self._section_heading_names()
         section_headings = soup.find_all(headings)
         valid_headings = [tag for tag in section_headings if isinstance(tag, Tag)]
 
-        sections: list[EpubSection] = []
+        sections: list[Section] = []
         temp_index = 1
 
         if not valid_headings:
@@ -245,7 +248,7 @@ class EpubConverter:
         first_section: Tag,
         chapter_dir: Path,
         temp_index: int,
-    ) -> EpubSection | None:
+    ) -> Section | None:
         intro_parts = self._collect_intro_parts(
             self._intro_candidates(soup, chapter_title_tag),
             first_section,
@@ -288,7 +291,7 @@ class EpubConverter:
         next_heading: Tag | None,
         chapter_dir: Path,
         temp_index: int,
-    ) -> EpubSection | None:
+    ) -> Section | None:
         section_title = section_heading.get_text().strip()
         section_level = self._heading_level(section_heading)
         section_parts = [section_heading]
@@ -334,7 +337,7 @@ class EpubConverter:
         level: int,
         *,
         source_fragment: str | None = None,
-    ) -> EpubSection | None:
+    ) -> Section | None:
         if not html_content.strip():
             return None
 
@@ -355,13 +358,13 @@ class EpubConverter:
 
         normalized_level = max(2, min(int(level), self.config.max_section_depth))
 
-        return EpubSection(
+        return Section(
             title=section_title,
             filename=md_filename,
             file_path=str(md_path),
             word_count=len(markdown_content.split()),
             character_count=len(markdown_content),
-            slug_hint=self._slugify(slug_hint, fallback="section"),
+            slug_hint=make_slug(slug_hint, fallback="section"),
             source_fragment=self._normalize_fragment(source_fragment),
             level=normalized_level,
         )
@@ -373,7 +376,7 @@ class EpubConverter:
         slug_hint: str,
         chapter_dir: Path,
         temp_index: int,
-    ) -> EpubSection | None:
+    ) -> Section | None:
         chapter_title_tag = soup.find(["h1", "h2", "h3"])
         if chapter_title_tag:
             chapter_title_tag.decompose()
@@ -433,37 +436,15 @@ class EpubConverter:
         except Exception:
             return []
 
-    def _clean_filename(self, filename: str) -> str:
-        cleaned = re.sub(r'[<>:"/\\|?*]', "", filename)
-        cleaned = re.sub(r"[^\w\s\-._()]", "", cleaned)
-        cleaned = re.sub(r"\s+", "-", cleaned.strip())
-        cleaned = cleaned.lower()
-        cleaned = cleaned.strip("-")[:100]
-        return cleaned or ""
-
-    def _slugify(self, text: str | None, fallback: str) -> str:
-        if not text:
-            return fallback
-        slug = self._clean_filename(text)
-        return slug or fallback
-
-    def _determine_padding(self, count: int) -> int:
-        if count < 10:
-            return 1
-        return len(str(count))
-
-    def _format_number(self, value: int, width: int) -> str:
-        return str(value).zfill(width) if width > 1 else str(value)
-
     def _apply_nav_titles(
         self,
-        chapters: list[EpubChapter],
+        chapters: list[Chapter],
         nav_entries: Sequence[toc_checker.TocEntry] | None,
     ) -> None:
         if not nav_entries or not chapters:
             return
 
-        chapters_by_source: dict[str, list[EpubChapter]] = defaultdict(list)
+        chapters_by_source: dict[str, list[Chapter]] = defaultdict(list)
         for chapter in chapters:
             source_key = _normalize_path_value(chapter.source_file)
             if source_key:
@@ -481,7 +462,7 @@ class EpubConverter:
             if not normalized_title:
                 continue
 
-            matched_chapter: EpubChapter | None = None
+            matched_chapter: Chapter | None = None
             href_path = _path_from_href_value(entry.href)
             if href_path:
                 for candidate in chapters_by_source.get(href_path, []):
@@ -504,127 +485,6 @@ class EpubConverter:
 
             matched_chapter.title = normalized_title
             claimed_ids.add(id(matched_chapter))
-
-    def _emit_output_files(self, chapters: list[EpubChapter], output_dir: Path) -> None:
-        if self.config.max_output_depth <= 1:
-            self._flatten_sections(chapters, output_dir)
-        else:
-            self._write_structured_sections(chapters, output_dir)
-
-    def _write_structured_sections(self, chapters: list[EpubChapter], output_dir: Path) -> None:
-        if not chapters:
-            return
-
-        padding = self._determine_padding(len(chapters))
-
-        for index, chapter in enumerate(chapters, start=1):
-            existing_sections = [section for section in chapter.sections if Path(section.file_path).exists()]
-            if len(existing_sections) <= 1:
-                self._write_chapter_flat_file(chapter, output_dir, index, padding)
-                continue
-
-            chapter_slug = self._slugify(
-                chapter.title,
-                fallback=f"chapter-{self._format_number(index, padding)}",
-            )
-            chapter.slug = chapter_slug[:80] or "chapter"
-
-            chapter_dir_name = f"{self._format_number(index, padding)}-{chapter.slug}"
-            final_dir = output_dir / chapter_dir_name
-            if final_dir.exists():
-                shutil.rmtree(final_dir)
-            final_dir.mkdir(parents=True, exist_ok=True)
-
-            section_padding = self._determine_padding(len(existing_sections)) if existing_sections else 1
-            for section_index, section in enumerate(existing_sections, start=1):
-                self._move_section_file(
-                    section=section,
-                    destination_dir=final_dir,
-                    section_index=section_index,
-                    padding=section_padding,
-                )
-
-            chapter.output_filename = None
-            chapter.output_path = str(final_dir)
-
-            shutil.rmtree(chapter.working_dir, ignore_errors=True)
-
-    def _move_section_file(
-        self,
-        *,
-        section: EpubSection,
-        destination_dir: Path,
-        section_index: int,
-        padding: int,
-    ) -> None:
-        source_path = Path(section.file_path)
-        if not source_path.exists():
-            return
-
-        slug = self._slugify(section.slug_hint, fallback="section")
-        final_name = f"{self._format_number(section_index, padding)}-{slug[:80]}.md"
-        final_path = destination_dir / final_name
-        if final_path.exists():
-            final_path.unlink()
-
-        source_path.replace(final_path)
-
-        section.filename = final_name
-        section.file_path = str(final_path)
-
-    def _write_chapter_flat_file(
-        self,
-        chapter: EpubChapter,
-        output_dir: Path,
-        index: int,
-        padding: int,
-    ) -> None:
-        chapter_slug = self._slugify(
-            chapter.title,
-            fallback=f"chapter-{self._format_number(index, padding)}",
-        )
-        chapter.slug = chapter_slug[:80] or "chapter"
-
-        final_filename = f"{self._format_number(index, padding)}-{chapter.slug}.md"
-        final_path = output_dir / final_filename
-        if final_path.exists():
-            final_path.unlink()
-
-        content_parts: list[str] = []
-        chapter_title = chapter.title.strip()
-        if chapter_title:
-            content_parts.append(f"# {chapter_title}")
-
-        for section in chapter.sections:
-            section_path = Path(section.file_path)
-            section_text = ""
-            if section_path.exists():
-                section_text = section_path.read_text(encoding="utf-8").strip()
-            if section_text:
-                content_parts.append(section_text)
-
-            section.filename = final_filename
-            section.file_path = str(final_path)
-
-        combined = "\n\n".join(part for part in (part.strip() for part in content_parts) if part)
-        if not combined:
-            combined = f"# {chapter.title or 'Chapter'}"
-
-        final_path.write_text(combined.rstrip() + "\n", encoding="utf-8")
-
-        chapter.output_filename = final_filename
-        chapter.output_path = str(final_path)
-
-        shutil.rmtree(chapter.working_dir, ignore_errors=True)
-
-    def _flatten_sections(self, chapters: list[EpubChapter], output_dir: Path) -> None:
-        if not chapters:
-            return
-
-        padding = self._determine_padding(len(chapters))
-
-        for index, chapter in enumerate(chapters, start=1):
-            self._write_chapter_flat_file(chapter, output_dir, index, padding)
 
     def _prepare_epub_for_conversion(self, epub_path: Path) -> tuple[Path, Path | None]:
         with ZipFile(epub_path) as z:

@@ -31,11 +31,12 @@ class TestEpubConverter:
             # Mock metadata
             mock_book.get_metadata.return_value = [("Test Book", {})]
 
-            # Mock items (chapters)
+            # Mock items (chapters) with spine ordering
             mock_item = MagicMock()
             mock_item.get_content.return_value = b"<html><body><h1>Chapter 1</h1><p>Content</p></body></html>"
             mock_item.get_name.return_value = "chapter1.html"
-            mock_book.get_items_of_type.return_value = [mock_item]
+            mock_book.spine = [("item1", "yes")]
+            mock_book.get_item_with_id.return_value = mock_item
 
             # Mock ZipFile for _prepare_epub_for_conversion
             with patch("ebook_tools.epub_converter.ZipFile") as mock_zip:

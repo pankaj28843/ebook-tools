@@ -7,8 +7,8 @@ This module defines the data structures used throughout the EPUB and PDF convers
 from pydantic import BaseModel, Field
 
 
-class EpubSection(BaseModel):
-    """Represents a section within an EPUB chapter."""
+class Section(BaseModel):
+    """Represents a section within a chapter."""
 
     title: str = Field(description="The section title")
     filename: str = Field(description="The markdown filename for this section")
@@ -23,8 +23,8 @@ class EpubSection(BaseModel):
     level: int = Field(default=2, description="Heading depth used when building nested output trees")
 
 
-class EpubChapter(BaseModel):
-    """Represents a chapter from an EPUB book."""
+class Chapter(BaseModel):
+    """Represents a chapter from a book."""
 
     title: str = Field(description="The chapter title")
     slug: str = Field(description="Slug used when deriving file names")
@@ -34,20 +34,18 @@ class EpubChapter(BaseModel):
         default=None,
         description="Absolute path to the chapter markdown file or directory root when structured output is enabled",
     )
-    sections: list[EpubSection] = Field(description="List of sections in this chapter")
-    source_file: str = Field(description="Original EPUB source file name")
+    sections: list[Section] = Field(description="List of sections in this chapter")
+    source_file: str = Field(description="Original source file name")
 
 
 class ConversionResult(BaseModel):
-    """Results from converting an EPUB to structured Markdown."""
+    """Results from converting a book to structured Markdown."""
 
     book_title: str = Field(description="The title of the book")
     chapters_count: int = Field(description="Number of chapters converted")
     sections_count: int = Field(description="Total number of sections across all chapters")
     output_directory: str = Field(description="Path to the output directory")
-    chapters: list[EpubChapter] = Field(description="List of converted chapters")
-    table_of_contents_path: str | None = Field(default=None, description="Path to generated table of contents file")
-    toc_json_path: str | None = Field(default=None, description="Path to generated JSON table of contents data")
+    chapters: list[Chapter] = Field(description="List of converted chapters")
 
 
 class EpubInfo(BaseModel):
@@ -77,3 +75,8 @@ class PdfInfo(BaseModel):
     has_outline: bool = Field(description="Whether the PDF has a table of contents (outline/bookmarks)")
     has_images: bool = Field(description="Whether the PDF contains images")
     file_size_mb: float = Field(description="File size in megabytes")
+
+
+# Backward-compatible aliases
+EpubChapter = Chapter
+EpubSection = Section

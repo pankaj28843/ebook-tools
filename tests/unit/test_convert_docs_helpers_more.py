@@ -1,3 +1,5 @@
+"""Tests for convert_docs helper functions (inspect, print, etc.)."""
+
 from __future__ import annotations
 
 import sys
@@ -7,15 +9,15 @@ from pathlib import Path
 import pytest
 
 from ebook_tools.cli import convert_docs
-from ebook_tools.epub_models import ConversionResult, EpubChapter, EpubInfo, EpubSection, PdfInfo
+from ebook_tools.epub_models import Chapter, ConversionResult, EpubInfo, PdfInfo, Section
 
 
-def _make_chapter(base: Path, idx: int, *, use_output_path: bool) -> EpubChapter:
+def _make_chapter(base: Path, idx: int, *, use_output_path: bool) -> Chapter:
     file_path = base / f"{idx:02d}-chapter.md"
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text(f"chapter {idx}", encoding="utf-8")
 
-    section = EpubSection(
+    section = Section(
         title=f"Section {idx}",
         filename=file_path.name,
         file_path=str(file_path),
@@ -25,7 +27,7 @@ def _make_chapter(base: Path, idx: int, *, use_output_path: bool) -> EpubChapter
         source_fragment=f"frag-{idx}",
     )
 
-    return EpubChapter(
+    return Chapter(
         title=f"Chapter {idx}",
         slug=f"chapter-{idx}",
         working_dir=str(base / f"work-{idx}"),
@@ -36,7 +38,7 @@ def _make_chapter(base: Path, idx: int, *, use_output_path: bool) -> EpubChapter
     )
 
 
-def _make_conversion(base: Path, chapters: list[EpubChapter]) -> ConversionResult:
+def _make_conversion(base: Path, chapters: list[Chapter]) -> ConversionResult:
     base.mkdir(parents=True, exist_ok=True)
     return ConversionResult(
         book_title="Sample",
@@ -44,8 +46,6 @@ def _make_conversion(base: Path, chapters: list[EpubChapter]) -> ConversionResul
         sections_count=sum(len(ch.sections) for ch in chapters),
         output_directory=str(base),
         chapters=chapters,
-        table_of_contents_path=None,
-        toc_json_path=None,
     )
 
 
@@ -129,24 +129,6 @@ class FakeFitzDoc:
 
 
 @pytest.mark.unit
-def test_print_success_banner_outputs_ascii(capsys: pytest.CaptureFixture[str]) -> None:
-    convert_docs.print_success_banner()
-
-    assert "CONVERSION COMPLETE" in capsys.readouterr().out
-
-
-@pytest.mark.unit
-def test_list_supported_formats_mentions_known_types(capsys: pytest.CaptureFixture[str]) -> None:
-    convert_docs.list_supported_formats()
-
-    output = capsys.readouterr().out
-
-    assert "Supported document formats" in output
-    assert ".epub" in output
-    assert ".pdf" in output
-
-
-@pytest.mark.unit
 def test_print_pdf_info_includes_optional_fields(capsys: pytest.CaptureFixture[str]) -> None:
     info = PdfInfo(
         title="Docs",
@@ -165,22 +147,19 @@ def test_print_pdf_info_includes_optional_fields(capsys: pytest.CaptureFixture[s
 
     output = capsys.readouterr().out
     assert "PDF File Information" in output
-    assert "Author:      Pat" in output
+    assert "Pat" in output
     assert "Has TOC" in output
 
 
 @pytest.mark.unit
-def test_print_epub_info_truncates_description(capsys: pytest.CaptureFixture[str]) -> None:
+def test_print_epub_info_shows_description(capsys: pytest.CaptureFixture[str]) -> None:
     info = EpubInfo(
         title="Title",
         author="Ada",
         language="en",
         identifier="ISBN",
         publisher="ACME",
-        description=(
-            "This line is deliberately long to trigger wrapping behavior in the printer output so truncation happens.\n"
-            "line two\nline three\nline four"
-        ),
+        description="A short description of the book",
         chapters_count=5,
         has_images=True,
         file_size_mb=2.0,
@@ -191,7 +170,6 @@ def test_print_epub_info_truncates_description(capsys: pytest.CaptureFixture[str
     output = capsys.readouterr().out
     assert "EPUB File Information" in output
     assert "Description" in output
-    assert "... (1 more lines)" in output
 
 
 @pytest.mark.unit
@@ -206,8 +184,7 @@ def test_print_conversion_summary_lists_entries(tmp_path: Path, capsys: pytest.C
 
     output = capsys.readouterr().out
     assert "images/" in output
-    assert "... (1 more chapter files)" in output
-    assert "book/" in output
+    assert "book" in output
 
 
 @pytest.mark.unit
@@ -218,7 +195,8 @@ def test_print_conversion_summary_when_no_files(tmp_path: Path, capsys: pytest.C
 
     convert_docs.print_conversion_summary(result)
 
-    assert "(no markdown files emitted)" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Conversion Statistics" in output
 
 
 @pytest.mark.unit

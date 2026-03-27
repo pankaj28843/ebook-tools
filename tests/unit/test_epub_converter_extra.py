@@ -25,17 +25,17 @@ def make_chapter(title, working_dir="/tmp/chapter", sections=None, source_file="
     )
 
 
-def test_clean_filename_and_slugify_roundtrip():
-    conv = EpubConverter()
-    dirty = "This / Is: A? Test<>File *Name | With Weird -- chars"
-    cleaned = conv._clean_filename(dirty)
-    # cleaned should be lower, no slashes, and hyphen separated
-    assert "/" not in cleaned
-    assert cleaned == cleaned.lower()
+def test_make_slug_roundtrip():
+    from ebook_tools.converter_base import make_slug
 
-    # slugify falls back when given None
-    assert conv._slugify(None, fallback="fallback") == "fallback"
-    assert conv._slugify("  My Title  ", fallback="x") != ""
+    dirty = "This / Is: A? Test<>File *Name | With Weird -- chars"
+    slug = make_slug(dirty)
+    assert "/" not in slug
+    assert slug == slug.lower()
+
+    # make_slug falls back when given None
+    assert make_slug(None, fallback="fallback") == "fallback"
+    assert make_slug("  My Title  ", fallback="x") != ""
 
 
 def test_apply_nav_titles_prefers_href_matches():

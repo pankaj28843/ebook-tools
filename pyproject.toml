@@ -1,7 +1,7 @@
 [project]
 name = "ebook-tools"
 version = "0.1.0"
-description = "Ebook and PDF to Markdown converters extracted from docs-mcp-server"
+description = "Convert EPUB and PDF books to structured Markdown trees"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -11,6 +11,9 @@ dependencies = [
     "pydantic>=2.0.0",
     "pymupdf>=1.26.5",
     "pymupdf4llm>=0.0.27",
+    "python-slugify>=8.0.0",
+    "rich>=13.0.0",
+    "typer>=0.15.0",
 ]
 
 [project.scripts]
@@ -28,7 +31,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["uv_build>=0.9.0,<0.10.0"]
+requires = ["uv_build>=0.9.0,<0.12.0"]
 build-backend = "uv_build"
 
 [tool.ruff]

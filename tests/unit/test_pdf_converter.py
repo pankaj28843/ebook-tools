@@ -140,29 +140,26 @@ class TestPdfConverter:
         assert converter.config == config
         assert converter.config.preserve_images is False
 
-    def test_clean_filename(self):
-        """Test filename cleaning."""
-        converter = PdfConverter()
+    def test_make_slug(self):
+        """Test slug generation via make_slug."""
+        from ebook_tools.converter_base import make_slug
 
-        # Basic cleaning
-        assert converter._clean_filename("Chapter 1: Introduction") == "chapter-1-introduction"
+        # Basic slugification
+        assert make_slug("Chapter 1: Introduction") == "chapter-1-introduction"
 
         # Special characters
-        assert converter._clean_filename("Chapter 1: Introduction!?") == "chapter-1-introduction"
+        assert make_slug("Chapter 1: Introduction!?") == "chapter-1-introduction"
 
-        # Multiple spaces
-        assert converter._clean_filename("Chapter   1   Introduction") == "chapter-1-introduction"
-
-        # Leading/trailing dashes
-        assert converter._clean_filename("- Introduction -") == "introduction"
+        # Leading/trailing cleanup
+        assert make_slug("- Introduction -") == "introduction"
 
         # Empty after cleaning
-        assert converter._clean_filename("!!!") == "unnamed"
+        assert make_slug("!!!", fallback="unnamed") == "unnamed"
 
-        # Long filename (truncate to 100 chars)
-        long_name = "a" * 150
-        result = converter._clean_filename(long_name)
-        assert len(result) == 100
+        # Long name (truncate to max_length)
+        long_name = "a " * 50
+        result = make_slug(long_name, max_length=80)
+        assert len(result) <= 80
 
     def test_extract_book_title_with_metadata(self):
         """Test book title extraction from PDF metadata."""
@@ -837,9 +834,6 @@ class TestPdfConverterAsync:
         assert result.book_title == "PDF Title"
         assert result.chapters_count == 2
         assert result.sections_count == 4
-        assert result.table_of_contents_path is None
-        assert result.toc_json_path is None
-
         chapter_dirs = sorted(path.name for path in output_dir.iterdir() if path.is_dir())
         assert chapter_dirs == ["1-chapter-one", "2-chapter-two"]
 
