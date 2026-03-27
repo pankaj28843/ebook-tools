@@ -6,10 +6,8 @@ output directory. Assets remain under a shared `images/` folder while **chapter*
 receive deterministic prefixes (`NN-chapter-slug.md`).
 
 The conversion leverages PyMuPDF (fitz) for text extraction and pymupdf4llm for
-Markdown conversion. It preserves:
-- Headings detected by font analysis (mapped to #/## levels)
-- Lists, code blocks, tables, inline formatting
-- Image references (rewritten to `images/<asset>`)
+Markdown conversion. For scanned/image-based PDFs, it falls back to OCR via
+Tesseract (requires tesseract-ocr system package).
 
 Typical usage:
     converter = PdfConverter()
@@ -17,6 +15,7 @@ Typical usage:
     print(f"Converted {result.chapters_count} chapters with {result.sections_count} sections")
 """
 
+import logging
 from pathlib import Path
 import re
 import shutil
@@ -38,6 +37,13 @@ from pydantic import BaseModel, Field
 from .converter_base import BaseConverter, make_slug
 from .epub_models import Chapter, ConversionResult, Section
 
+logger = logging.getLogger(__name__)
+
+# Minimum text characters per page to consider it "text-based"
+_MIN_TEXT_CHARS = 50
+# Minimum fraction of pages that must be scanned to treat the whole document as scanned
+_SCANNED_PAGE_THRESHOLD = 0.5
+
 
 class PdfConverterConfig(BaseModel):
     """Configuration for PDF conversion process."""
@@ -53,6 +59,86 @@ class PdfConverterConfig(BaseModel):
         ge=1,
         description="Maximum directory depth for emitted Markdown (1 preserves the flattened layout)",
     )
+    ocr_language: str = Field(
+        default="eng",
+        description="Tesseract language code for OCR (e.g. 'eng', 'deu', 'eng+fra')",
+    )
+    ocr_dpi: int = Field(
+        default=300,
+        ge=72,
+        le=600,
+        description="DPI for OCR rasterization (higher = better quality but slower)",
+    )
+
+
+def _is_tesseract_available() -> bool:
+    """Check if Tesseract OCR is available on the system."""
+    try:
+        fitz.get_tessdata()
+        return True
+    except RuntimeError:
+        return False
+
+
+def _page_needs_ocr(page: fitz.Page) -> bool:
+    """Determine if a page is scanned/image-based and needs OCR.
+
+    A page needs OCR when it has very little extractable text
+    but significant image coverage.
+    """
+    text = page.get_text("text").strip()
+    if len(text) >= _MIN_TEXT_CHARS:
+        return False
+
+    # Check if the page has images covering a significant area
+    images = page.get_image_info()
+    if not images:
+        return False
+
+    page_area = abs(page.rect)
+    if page_area == 0:
+        return False
+
+    img_coverage = 0.0
+    for img in images:
+        img_rect = fitz.Rect(img["bbox"]) & page.rect
+        img_coverage += abs(img_rect)
+
+    img_ratio = img_coverage / page_area
+    return img_ratio > 0.3
+
+
+def detect_pdf_type(doc: fitz.Document, sample_pages: int = 10) -> str:
+    """Classify a PDF as 'text', 'scanned', or 'mixed'.
+
+    Samples up to `sample_pages` pages spread across the document.
+    """
+    total = doc.page_count
+    if total == 0:
+        return "text"
+
+    # Sample pages evenly across the document
+    if total <= sample_pages:
+        indices = list(range(total))
+    else:
+        step = total / sample_pages
+        indices = [int(i * step) for i in range(sample_pages)]
+
+    scanned_count = 0
+    for idx in indices:
+        try:
+            page = doc[idx]
+        except (IndexError, TypeError, KeyError):
+            continue
+        if _page_needs_ocr(page):
+            scanned_count += 1
+
+    ratio = scanned_count / len(indices)
+    if ratio >= _SCANNED_PAGE_THRESHOLD:
+        return "scanned"
+    elif scanned_count > 0:
+        return "mixed"
+    return "text"
 
 
 class PdfConverter(BaseConverter):
@@ -80,6 +166,24 @@ class PdfConverter(BaseConverter):
             book_title = book_title or self._extract_book_title(doc)
             if self.config.preserve_images:
                 (output_dir / "images").mkdir(exist_ok=True)
+
+            # Detect if PDF is scanned
+            pdf_type = detect_pdf_type(doc)
+            if pdf_type in ("scanned", "mixed"):
+                if _is_tesseract_available():
+                    logger.info(
+                        "Detected %s PDF — using OCR (language=%s, dpi=%d)",
+                        pdf_type,
+                        self.config.ocr_language,
+                        self.config.ocr_dpi,
+                    )
+                else:
+                    logger.warning(
+                        "Detected %s PDF but Tesseract is not installed. "
+                        "Install with: sudo apt install tesseract-ocr tesseract-ocr-%s",
+                        pdf_type,
+                        self.config.ocr_language.split("+")[0],
+                    )
 
             chapters_info = self._extract_chapters_info(doc)
             chapters: list[Chapter] = []
@@ -180,6 +284,8 @@ class PdfConverter(BaseConverter):
         chapter_dir.mkdir(parents=True, exist_ok=True)
 
         page_range = list(range(start_page, end_page))
+
+        # Try standard extraction first
         markdown_text = pymupdf4llm.to_markdown(
             doc,
             pages=page_range,
@@ -188,6 +294,12 @@ class PdfConverter(BaseConverter):
             image_path=str(output_dir / "images"),
             image_format="png",
         )
+
+        # If result is mostly empty, try OCR for scanned pages
+        if self._text_is_insufficient(markdown_text, len(page_range)):
+            ocr_text = self._ocr_pages(doc, page_range)
+            if ocr_text and len(ocr_text.strip()) > len(markdown_text.strip()):
+                markdown_text = ocr_text
 
         if self.config.code_language:
             markdown_text = self._add_code_language_hints(markdown_text, self.config.code_language)
@@ -215,6 +327,51 @@ class PdfConverter(BaseConverter):
             sections=chapter_sections,
             source_file=pdf_filename,
         )
+
+    def _text_is_insufficient(self, markdown_text: str, num_pages: int) -> bool:
+        """Check if extracted markdown has too little text for the given page count."""
+        stripped = markdown_text.strip()
+        # Remove image references and whitespace to count actual text
+        text_only = re.sub(r"!\[.*?\]\(.*?\)", "", stripped)
+        text_only = re.sub(r"\s+", " ", text_only).strip()
+        # Expect at least ~20 chars per page for text-based content
+        return len(text_only) < max(num_pages * 20, _MIN_TEXT_CHARS)
+
+    def _ocr_pages(self, doc: fitz.Document, page_range: list[int]) -> str:
+        """Run OCR on the given pages and return combined markdown-formatted text."""
+        if not _is_tesseract_available():
+            return ""
+
+        parts: list[str] = []
+        for page_num in page_range:
+            try:
+                page = doc[page_num]
+            except (IndexError, TypeError, KeyError):
+                continue
+            if not _page_needs_ocr(page):
+                # Page has text already -- extract normally
+                text = page.get_text("text").strip()
+                if text:
+                    parts.append(text)
+                continue
+
+            try:
+                tp = page.get_textpage_ocr(
+                    language=self.config.ocr_language,
+                    dpi=self.config.ocr_dpi,
+                    full=True,
+                )
+                text = page.get_text("text", textpage=tp).strip()
+                if text:
+                    parts.append(text)
+            except Exception as e:
+                logger.warning("OCR failed for page %d: %s", page_num, e)
+
+        if not parts:
+            return ""
+
+        # Format as basic markdown -- each page separated by a horizontal rule
+        return "\n\n---\n\n".join(parts)
 
     def _split_markdown_by_heading(self, md_text: str, chapter_title: str) -> list[tuple[str, str, int]]:
         """Split markdown into sections using heading levels (with intro fallback)."""

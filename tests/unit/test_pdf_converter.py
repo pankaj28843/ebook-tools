@@ -9,7 +9,76 @@ import pytest
 
 from ebook_tools.cli import convert_docs
 from ebook_tools.epub_models import EpubChapter, EpubSection
-from ebook_tools.pdf_converter import PdfConverter, PdfConverterConfig
+from ebook_tools.pdf_converter import PdfConverter, PdfConverterConfig, detect_pdf_type, _page_needs_ocr
+
+
+class _FakeOcrPage:
+    """A fake page that simulates a scanned page (no text, large image)."""
+
+    def __init__(self, text: str = "", image_coverage: float = 0.9):
+        self._text = text
+        self._image_coverage = image_coverage
+
+    def get_text(self, mode: str = "text"):
+        return self._text
+
+    def get_image_info(self):
+        if self._image_coverage > 0:
+            return [{"bbox": (0, 0, 612 * self._image_coverage, 792)}]
+        return []
+
+    @property
+    def rect(self):
+        import fitz
+        return fitz.Rect(0, 0, 612, 792)
+
+
+@pytest.mark.unit
+class TestOcrDetection:
+    def test_page_needs_ocr_with_text(self):
+        page = _FakeOcrPage(text="A" * 100)
+        assert _page_needs_ocr(page) is False
+
+    def test_page_needs_ocr_scanned(self):
+        page = _FakeOcrPage(text="", image_coverage=0.8)
+        assert _page_needs_ocr(page) is True
+
+    def test_page_needs_ocr_no_images(self):
+        page = _FakeOcrPage(text="", image_coverage=0.0)
+        assert _page_needs_ocr(page) is False
+
+    def test_detect_pdf_type_text(self):
+        class FakeDoc:
+            page_count = 5
+            def __getitem__(self, idx):
+                return _FakeOcrPage(text="A" * 200)
+        assert detect_pdf_type(FakeDoc()) == "text"
+
+    def test_detect_pdf_type_scanned(self):
+        class FakeDoc:
+            page_count = 5
+            def __getitem__(self, idx):
+                return _FakeOcrPage(text="", image_coverage=0.9)
+        assert detect_pdf_type(FakeDoc()) == "scanned"
+
+    def test_detect_pdf_type_mixed(self):
+        class FakeDoc:
+            page_count = 4
+            def __getitem__(self, idx):
+                if idx < 1:
+                    return _FakeOcrPage(text="", image_coverage=0.9)
+                return _FakeOcrPage(text="A" * 200)
+        assert detect_pdf_type(FakeDoc()) == "mixed"
+
+    def test_detect_pdf_type_empty(self):
+        class FakeDoc:
+            page_count = 0
+        assert detect_pdf_type(FakeDoc()) == "text"
+
+    def test_ocr_config_language(self):
+        config = PdfConverterConfig(ocr_language="deu+eng", ocr_dpi=400)
+        assert config.ocr_language == "deu+eng"
+        assert config.ocr_dpi == 400
 
 
 class _FakePage:
@@ -102,6 +171,8 @@ class TestPdfConverterConfig:
         assert config.code_language is None
         assert config.heading_style == "ATX"
         assert config.max_output_depth == 2
+        assert config.ocr_language == "eng"
+        assert config.ocr_dpi == 300
 
     def test_custom_config(self):
         """Test custom configuration values."""

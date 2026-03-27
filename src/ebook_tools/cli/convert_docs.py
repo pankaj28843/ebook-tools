@@ -385,6 +385,10 @@ def convert_cmd(
         help="Maximum directory depth for emitted Markdown (1 = flat layout)",
         min=1,
     )] = 2,
+    language: Annotated[str, typer.Option(
+        "--language", "-l",
+        help="OCR language for scanned PDFs (Tesseract code, e.g. 'eng', 'deu', 'eng+fra')",
+    )] = "eng",
 ):
     """Convert an EPUB or PDF file to structured Markdown."""
     input_path = input_file.expanduser().resolve()
@@ -436,6 +440,7 @@ def convert_cmd(
             max_section_depth=2,
             code_language=None,
             max_output_depth=max_output_depth,
+            ocr_language=language,
         )
         result = asyncio.run(convert_pdf_to_markdown(
             input_path=input_path,
@@ -469,6 +474,10 @@ def main_callback(
         help="Maximum directory depth (1 = flat)",
         min=1,
     )] = 2,
+    language: Annotated[str, typer.Option(
+        "--language", "-l",
+        help="OCR language for scanned PDFs (e.g. 'eng', 'deu')",
+    )] = "eng",
     inspect: Annotated[bool, typer.Option(
         "--inspect",
         help="Inspect file metadata without converting",
@@ -501,7 +510,7 @@ def main_callback(
         inspect_cmd(input_file)
         return
 
-    convert_cmd(input_file, output=output, title=title, max_output_depth=max_output_depth)
+    convert_cmd(input_file, output=output, title=title, max_output_depth=max_output_depth, language=language)
 
 
 def main():
